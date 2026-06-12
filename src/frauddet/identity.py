@@ -19,6 +19,40 @@ import re
 _SUBSCRIBER_LEN = 9
 
 
+_OBJECTID_HEX = re.compile(r"^[0-9a-fA-F]{24}$")
+
+
+def is_objectid_hex(value) -> bool:
+    """True if value looks like a stringified Mongo ObjectId (24 hex chars).
+
+    Needed because `walletaccounts.userId` is polymorphic: most rows hold the
+    players._id hex string, a few hold a phone (verified Phase 1b). Real phone
+    strings are <=12 digits, so the two forms never collide.
+    """
+    return bool(_OBJECTID_HEX.match(str(value))) if value is not None else False
+
+
+def looks_like_test_number(phone: str | None) -> bool:
+    """ADVISORY heuristic: does a normalized phone look like a made-up test number?
+
+    Flags: a digit repeated 5+ times ("751111111"), a 2-digit block repeated 3+
+    times ("751010101"), a 3-digit block repeated twice ("789789789"), or the
+    whole number using <=2 distinct digits ("6666699999").
+
+    NEVER use as an exclusion key: on dev data most REAL registered players also
+    match (they are themselves test accounts). Classification evidence only.
+    """
+    if not phone:
+        return False
+    p = str(phone)
+    return bool(
+        re.search(r"(\d)\1{4}", p)
+        or re.search(r"(\d{2})\1{2}", p)
+        or re.search(r"(\d{3})\1", p)
+        or len(set(p)) <= 2
+    )
+
+
 def normalize_phone(value) -> str | None:
     """Return the canonical 9-digit subscriber number, or None if implausible.
 
