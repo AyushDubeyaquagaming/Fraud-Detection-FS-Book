@@ -7,7 +7,7 @@ read-only; the only writes are deterministic parquet/report outputs under
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -38,6 +38,9 @@ class BuildResult:
     parquet_counts: dict[str, int]
     report_paths: dict[str, Path]
     withdrawal_anomaly: dict[str, Any]
+    anomalies: list[dict[str, Any]]
+    identity_collisions: list[dict[str, Any]]
+    collapsed_withdrawal_count: int
 
 
 def rebuild_all_flattened_outputs(output_dir: Path | None = None) -> BuildResult:
@@ -80,6 +83,15 @@ def rebuild_all_flattened_outputs_from_db(db: Database, output_dir: Path) -> Bui
     players = flatten_players(source_docs["players"], mapper)
     bets = flatten_bets(source_docs["bets"], mapper)
     money = flatten_money(source_docs["deposits"], source_docs["withdrawals"], mapper)
+    collapsed_withdrawal_count = len(collapse_withdrawal_lifecycles(source_docs["withdrawals"]))
+    expected_money_rows = len(source_docs["deposits"]) + collapsed_withdrawal_count
+    if len(money) != expected_money_rows:
+        raise AssertionError(
+            "money.parquet row count mismatch: "
+            f"expected {expected_money_rows} "
+            f"({len(source_docs['deposits'])} deposits + {collapsed_withdrawal_count} collapsed withdrawals), "
+            f"got {len(money)}"
+        )
     bonus = flatten_bonus(source_docs["bonus"], mapper, deposit_ids, bet_ids)
     activity = flatten_activity(source_docs["activity"], mapper)
     logins = flatten_logins(source_docs["logins"], mapper)
@@ -104,13 +116,22 @@ def rebuild_all_flattened_outputs_from_db(db: Database, output_dir: Path) -> Bui
     withdrawal_anomaly = analyze_withdrawal_account_resolution(
         source_docs["withdrawals"], source_docs["walletaccounts"], source_docs["cashaccounts"]
     )
-    unjoined_report = write_unjoined_report(output_dir / "unjoined_report.md", frames, cfg)
+    anomalies = list(withdrawal_anomaly["anomalies"])
+    identity_collisions = [asdict(collision) for collision in mapper.phone_collisions]
+    unjoined_report = write_unjoined_report(
+        output_dir / "unjoined_report.md",
+        frames,
+        cfg,
+        identity_collisions=identity_collisions,
+    )
     reconciliation_report = write_reconciliation_report(
         output_dir / "flatten_reconciliation.md",
         raw_counts,
         parquet_counts,
+        collapsed_withdrawal_count,
         withdrawal_anomaly,
         cfg,
+        identity_collisions=identity_collisions,
     )
 
     return BuildResult(
@@ -122,6 +143,9 @@ def rebuild_all_flattened_outputs_from_db(db: Database, output_dir: Path) -> Bui
             "reconciliation": reconciliation_report,
         },
         withdrawal_anomaly=withdrawal_anomaly,
+        anomalies=anomalies,
+        identity_collisions=identity_collisions,
+        collapsed_withdrawal_count=collapsed_withdrawal_count,
     )
 
 
@@ -233,6 +257,7 @@ def flatten_money(
     for doc in deposit_docs:
         ident = mapper.resolve(doc.get("userId"))
         status = _lower(doc.get("status"))
+        deposit_updated_at = _utc(doc.get("updatedAt"))
         rows.append(
             {
                 "player_key": ident.player_key,
@@ -245,7 +270,9 @@ def flatten_money(
                 "account_number": doc.get("accountNumber"),
                 "final_status": status,
                 "requested_at": _utc(doc.get("createdAt")),
-                "finalized_at": _utc(doc.get("createdAt")),
+                "finalized_at": deposit_updated_at
+                if pd.notna(deposit_updated_at)
+                else _utc(doc.get("createdAt")),
                 "execution_type": None,
                 "recipient_normalized": None,
                 "is_third_party_recipient": False,
@@ -433,7 +460,7 @@ def flatten_logins(docs: Iterable[dict[str, Any]], mapper: IdentityMapper) -> pd
     rows: list[dict[str, Any]] = []
     for doc in docs:
         user_type = doc.get("userType")
-        ident = mapper.resolve(doc.get("loginId")) if user_type == "PLAYER" else IdentityResult(None, "unknown")
+        ident = mapper.resolve(doc.get("loginId")) if user_type == "PLAYER" else IdentityResult(None, "staff")
         rows.append(
             {
                 "player_key": ident.player_key,
@@ -482,6 +509,8 @@ def analyze_withdrawal_account_resolution(
     from_counter: Counter[tuple[str, str]] = Counter()
     missing_from: Counter[tuple[str, str]] = Counter()
     wallet_to_statuses: Counter[str] = Counter()
+    wallet_to_rows: list[dict[str, Any]] = []
+    missing_non_reversal_rows: list[dict[str, Any]] = []
     for doc in withdrawal_docs:
         status = _lower(doc.get("status"))
         to_class = classify(doc.get("toAccountId"))
@@ -492,6 +521,41 @@ def analyze_withdrawal_account_resolution(
             missing_from[(status, to_class)] += 1
         if to_class == "walletaccounts":
             wallet_to_statuses[status] += 1
+            wallet_to_rows.append(_withdrawal_account_row(doc, from_class, to_class))
+        if from_class == "missing" and to_class != "walletaccounts":
+            missing_non_reversal_rows.append(_withdrawal_account_row(doc, from_class, to_class))
+
+    wallet_allowed = {"failed", "declined"}
+    missing_allowed = {"initiated"}
+    wallet_offenders = [
+        row for row in wallet_to_rows if row["status"] not in wallet_allowed
+    ]
+    missing_offenders = [
+        row for row in missing_non_reversal_rows if row["status"] not in missing_allowed
+    ]
+    invariants = [
+        {
+            "name": "wallet_pointing_toAccountId_statuses_subset_failed_declined",
+            "verified": not wallet_offenders,
+            "allowed_statuses": sorted(wallet_allowed),
+            "offending_rows": wallet_offenders,
+        },
+        {
+            "name": "non_reversal_missing_fromAccountId_statuses_subset_initiated",
+            "verified": not missing_offenders,
+            "allowed_statuses": sorted(missing_allowed),
+            "offending_rows": missing_offenders,
+        },
+    ]
+    anomalies = [
+        {
+            "source": "withdrawaltransactions",
+            "invariant": invariant["name"],
+            "offending_rows": invariant["offending_rows"],
+        }
+        for invariant in invariants
+        if not invariant["verified"]
+    ]
 
     return {
         "status_x_to_account": _nested_counter(to_counter),
@@ -500,6 +564,8 @@ def analyze_withdrawal_account_resolution(
         "wallet_pointing_to_account_count": sum(wallet_to_statuses.values()),
         "wallet_pointing_to_account_statuses": dict(sorted(wallet_to_statuses.items())),
         "missing_from_account_count": sum(missing_from.values()),
+        "invariants": invariants,
+        "anomalies": anomalies,
     }
 
 
@@ -507,6 +573,7 @@ def write_unjoined_report(
     path: Path,
     frames: dict[str, pd.DataFrame],
     cfg: dict[str, Any] | None = None,
+    identity_collisions: list[dict[str, Any]] | None = None,
 ) -> Path:
     """Write markdown counts and sample IDs for unresolved identities."""
     cfg = cfg or config.load_config()
@@ -521,6 +588,19 @@ def write_unjoined_report(
         *[f"- `{orphan}`" for orphan in known_orphans],
         "",
     ]
+    identity_collisions = identity_collisions or []
+    lines.extend(["## Identity Collisions", ""])
+    if identity_collisions:
+        lines.append("| phone | winning_key | losing_keys |")
+        lines.append("| --- | --- | --- |")
+        for collision in identity_collisions:
+            losing = ", ".join(collision["losing_keys"])
+            lines.append(
+                f"| {collision['phone']} | {collision['winning_key']} | {losing} |"
+            )
+        lines.append("")
+    else:
+        lines.extend(["No normalized phone collisions detected.", ""])
 
     id_columns = {
         "players": "player_key",
@@ -560,12 +640,20 @@ def write_reconciliation_report(
     path: Path,
     raw_counts: dict[str, int],
     parquet_counts: dict[str, int],
+    collapsed_withdrawal_count: int,
     withdrawal_anomaly: dict[str, Any],
     cfg: dict[str, Any] | None = None,
+    identity_collisions: list[dict[str, Any]] | None = None,
 ) -> Path:
     """Write raw Mongo vs parquet count reconciliation."""
     cfg = cfg or config.load_config()
-    expected_money = raw_counts["deposits"] + len_from_withdrawal_groups(raw_counts, parquet_counts)
+    identity_collisions = identity_collisions or []
+    expected_money = raw_counts["deposits"] + collapsed_withdrawal_count
+    if parquet_counts["money"] != expected_money:
+        raise AssertionError(
+            "money.parquet row count mismatch while writing reconciliation: "
+            f"expected {expected_money}, got {parquet_counts['money']}"
+        )
     lines = [
         "# Flatten Reconciliation",
         "",
@@ -574,8 +662,8 @@ def write_reconciliation_report(
         f"| players | {raw_counts['players']} | {parquet_counts['players']} | One row per player; no drops. |",
         f"| bets | {raw_counts['bets']} | {parquet_counts['bets']} | One row per ticket; unjoined rows kept. |",
         f"| deposits | {raw_counts['deposits']} | included in money | No deposit deduplication; all statuses kept and flags determine money-in. |",
-        f"| withdrawals | {raw_counts['withdrawals']} | included in money | Lifecycle collapse by `transactionId`; status order completed > declined > failed > pending > initiated. |",
-        f"| money | {raw_counts['deposits']} deposits + {raw_counts['withdrawals']} withdrawal docs | {parquet_counts['money']} | Money rows = all deposits plus collapsed withdrawal transactions; no status-based drops. |",
+        f"| withdrawals | {raw_counts['withdrawals']} | {collapsed_withdrawal_count} collapsed groups | Lifecycle collapse by `transactionId`; status order completed > declined > failed > pending > initiated. |",
+        f"| money | {raw_counts['deposits']} deposits + {collapsed_withdrawal_count} collapsed withdrawals | {parquet_counts['money']} | ASSERTED: money rows equal deposits plus collapsed withdrawals. |",
         f"| bonus | {raw_counts['bonus']} | {parquet_counts['bonus']} | One row per bonus transaction; currency is assumed `{cfg['flatten']['bonus']['ASSUMED_DEFAULT']}` because source has no currency field. |",
         f"| activity | {raw_counts['activity']} | {parquet_counts['activity']} | One row per activity event; unjoined rows kept. |",
         f"| logins | {raw_counts['logins']} | {parquet_counts['logins']} | One row per login log; staff rows kept with null player_key. |",
@@ -590,27 +678,21 @@ def write_reconciliation_report(
         "",
         _markdown_nested_counter(withdrawal_anomaly["missing_from_account"]),
         "",
-        (
-            f"`toAccountId` points to `walletaccounts` in "
-            f"{withdrawal_anomaly['wallet_pointing_to_account_count']} docs, all with statuses "
-            f"{withdrawal_anomaly['wallet_pointing_to_account_statuses']}. These are failed/declined "
-            "reversal/failure lifecycle documents, so the configured lifecycle collapse remains valid."
-        ),
-        (
-            f"`fromAccountId` is missing in {withdrawal_anomaly['missing_from_account_count']} docs: "
-            "initial request rows have no account IDs yet, while failed/declined reversal rows point "
-            "back to the wallet in `toAccountId`."
-        ),
+        "## Coded Invariants",
+        "",
+        *[
+            _invariant_report_block(invariant)
+            for invariant in withdrawal_anomaly["invariants"]
+        ],
+        "",
+        "## Identity Collisions",
+        "",
+        _identity_collision_report(identity_collisions),
         "",
         f"Computed money row check: {expected_money}.",
     ]
     path.write_text("\n".join(lines), encoding="utf-8")
     return path
-
-
-def len_from_withdrawal_groups(raw_counts: dict[str, int], parquet_counts: dict[str, int]) -> int:
-    """Return collapsed withdrawal count inferred from money parquet metadata."""
-    return parquet_counts["money"] - raw_counts["deposits"]
 
 
 def _read_required_docs(db: Database, collection_name: str | None) -> list[dict[str, Any]]:
@@ -632,6 +714,58 @@ def _validate_unique(docs: Iterable[dict[str, Any]], field: str, source: str) ->
     if duplicates:
         sample = ", ".join(sorted(duplicates)[:10])
         raise ValueError(f"{source}.{field} must be unique; duplicate sample: {sample}")
+
+
+def _withdrawal_account_row(
+    doc: dict[str, Any],
+    from_class: str,
+    to_class: str,
+) -> dict[str, Any]:
+    return {
+        "source_id": str(doc.get("_id")),
+        "transaction_id": doc.get("transactionId"),
+        "status": _lower(doc.get("status")),
+        "from_account_resolution": from_class,
+        "to_account_resolution": to_class,
+        "fromAccountId": str(doc.get("fromAccountId")) if doc.get("fromAccountId") is not None else None,
+        "toAccountId": str(doc.get("toAccountId")) if doc.get("toAccountId") is not None else None,
+    }
+
+
+def _invariant_report_block(invariant: dict[str, Any]) -> str:
+    allowed = ", ".join(invariant["allowed_statuses"])
+    if invariant["verified"]:
+        return f"VERIFIED invariant `{invariant['name']}`; allowed statuses: {allowed}."
+    return (
+        f"ANOMALY invariant `{invariant['name']}` violated; allowed statuses: {allowed}.\n\n"
+        + _markdown_rows(invariant["offending_rows"])
+    )
+
+
+def _identity_collision_report(identity_collisions: list[dict[str, Any]]) -> str:
+    if not identity_collisions:
+        return "No normalized phone collisions detected."
+    rows = [
+        {
+            "phone": collision["phone"],
+            "winning_key": collision["winning_key"],
+            "losing_keys": ", ".join(collision["losing_keys"]),
+        }
+        for collision in identity_collisions
+    ]
+    return _markdown_rows(rows)
+
+
+def _markdown_rows(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return "No offending rows."
+    columns = list(rows[0].keys())
+    lines = ["| " + " | ".join(columns) + " |"]
+    lines.append("| " + " | ".join("---" for _ in columns) + " |")
+    for row in rows:
+        values = [str(row.get(column, "")) for column in columns]
+        lines.append("| " + " | ".join(values) + " |")
+    return "\n".join(lines)
 
 
 def _ordered_frame(rows: list[dict[str, Any]], columns: list[str], sort_cols: list[str]) -> pd.DataFrame:
@@ -681,13 +815,13 @@ def _lower(value: Any) -> str:
 
 def _bonus_ref_kind(ref_trans_id: Any, deposit_ids: set[str], bet_ids: set[str]) -> str:
     if ref_trans_id is None:
-        return "none"
+        return "missing"
     ref = str(ref_trans_id)
     if ref in deposit_ids:
         return "deposit"
     if ref in bet_ids:
         return "bet"
-    return "none"
+    return "unresolved"
 
 
 def _valid_fingerprint(value: Any) -> str | None:
@@ -703,6 +837,7 @@ def _login_success(doc: dict[str, Any]) -> bool | None:
     if "success" in doc:
         return bool(doc.get("success"))
     operation = str(doc.get("operationType") or "").lower()
+    # ASSUMED - verify: dev loginlogs lack explicit success/failure fields.
     if operation == "login":
         return True
     return None

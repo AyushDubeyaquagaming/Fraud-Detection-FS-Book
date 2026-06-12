@@ -97,6 +97,63 @@ def test_identity_mapper_classifies_junk_and_unresolvable_inputs():
     assert mapper.resolve("0751111111").unjoined_class == "test_pattern"
 
 
+def test_identity_mapper_phone_collision_prefers_non_deleted_player():
+    mapper = IdentityMapper.from_players(
+        [
+            {
+                "_id": "deleted-player",
+                "username": "0757575757",
+                "contactNo": "0757575757",
+                "isDeleted": True,
+                "createdAt": "2026-06-02T00:00:00Z",
+            },
+            {
+                "_id": "active-player",
+                "username": "256757575757",
+                "contactNo": "0757575757",
+                "isDeleted": False,
+                "createdAt": "2026-06-01T00:00:00Z",
+            },
+        ]
+    )
+
+    assert mapper.resolve("0757575757").player_key == "active-player"
+    assert len(mapper.phone_collisions) == 1
+    collision = mapper.phone_collisions[0]
+    assert collision.phone == "757575757"
+    assert collision.winning_key == "active-player"
+    assert collision.losing_keys == ("deleted-player",)
+
+
+def test_identity_mapper_phone_collision_tiebreaks_latest_created_at():
+    mapper = IdentityMapper.from_players(
+        [
+            {
+                "_id": "older-player",
+                "username": "0757575757",
+                "isDeleted": False,
+                "createdAt": "2026-06-01T00:00:00Z",
+            },
+            {
+                "_id": "newer-player",
+                "username": "0757575757",
+                "isDeleted": False,
+                "createdAt": "2026-06-02T00:00:00Z",
+            },
+        ]
+    )
+
+    assert mapper.resolve("0757575757").player_key == "newer-player"
+
+
+def test_identity_mapper_resolves_referral_code_exact_match():
+    mapper = IdentityMapper.from_players(
+        [{"_id": "referrer", "username": "0757575757", "referralCode": "ABC123"}]
+    )
+
+    assert mapper.resolve("ABC123").player_key == "referrer"
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

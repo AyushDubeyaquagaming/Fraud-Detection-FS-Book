@@ -82,6 +82,15 @@ class IdentityResult:
     unjoined_class: str | None
 
 
+@dataclass(frozen=True)
+class IdentityCollision:
+    """A normalized phone attached to multiple player documents."""
+
+    phone: str
+    winning_key: str
+    losing_keys: tuple[str, ...]
+
+
 class IdentityMapper:
     """One resolver for all flattening joins.
 
@@ -97,12 +106,16 @@ class IdentityMapper:
         phone_to_key: dict[str, str],
         objectid_to_key: dict[str, str],
         player_id_to_key: dict[str, str] | None = None,
+        referral_code_to_key: dict[str, str] | None = None,
         preregistration_phones: set[str] | None = None,
+        phone_collisions: list[IdentityCollision] | None = None,
     ) -> None:
         self.phone_to_key = phone_to_key
         self.objectid_to_key = {k.lower(): v for k, v in objectid_to_key.items()}
         self.player_id_to_key = player_id_to_key or {}
+        self.referral_code_to_key = referral_code_to_key or {}
         self.preregistration_phones = preregistration_phones or set()
+        self.phone_collisions = phone_collisions or []
 
     @classmethod
     def from_players(
@@ -111,24 +124,60 @@ class IdentityMapper:
         preregistration_docs: Iterable[dict[str, Any]] | None = None,
     ) -> "IdentityMapper":
         """Build a mapper from raw player documents and optional OTP docs."""
+        player_docs = list(players)
         phone_to_key: dict[str, str] = {}
         objectid_to_key: dict[str, str] = {}
         player_id_to_key: dict[str, str] = {}
+        referral_code_to_key: dict[str, str] = {}
+        phone_candidates: dict[str, list[dict[str, Any]]] = {}
 
-        for player in players:
-            player_key = str(player.get("_id"))
-            if not player_key:
+        for player in player_docs:
+            raw_player_key = player.get("_id")
+            if raw_player_key is None:
                 continue
+            player_key = str(raw_player_key)
             objectid_to_key[player_key.lower()] = player_key
 
-            for phone_field in ("username", "contactNo"):
-                phone = normalize_phone(player.get(phone_field))
-                if phone:
-                    phone_to_key[phone] = player_key
+            player_phones = {
+                phone
+                for phone in (
+                    normalize_phone(player.get("username")),
+                    normalize_phone(player.get("contactNo")),
+                )
+                if phone
+            }
+            for phone in player_phones:
+                phone_candidates.setdefault(phone, []).append(player)
 
             player_id = player.get("playerId")
             if player_id is not None:
                 player_id_to_key[str(player_id)] = player_key
+
+            referral_code = player.get("referralCode")
+            if referral_code:
+                referral_code_to_key[str(referral_code).strip()] = player_key
+
+        phone_collisions: list[IdentityCollision] = []
+        for phone, candidates in phone_candidates.items():
+            winner = _choose_phone_owner(candidates)
+            winning_key = str(winner.get("_id"))
+            phone_to_key[phone] = winning_key
+            if len(candidates) > 1:
+                losing_keys = tuple(
+                    str(player.get("_id"))
+                    for player in sorted(
+                        candidates,
+                        key=lambda p: str(p.get("_id")),
+                    )
+                    if str(player.get("_id")) != winning_key
+                )
+                phone_collisions.append(
+                    IdentityCollision(
+                        phone=phone,
+                        winning_key=winning_key,
+                        losing_keys=losing_keys,
+                    )
+                )
 
         preregistration_phones: set[str] = set()
         if preregistration_docs is not None:
@@ -141,7 +190,9 @@ class IdentityMapper:
             phone_to_key=phone_to_key,
             objectid_to_key=objectid_to_key,
             player_id_to_key=player_id_to_key,
+            referral_code_to_key=referral_code_to_key,
             preregistration_phones=preregistration_phones,
+            phone_collisions=phone_collisions,
         )
 
     def resolve(self, value: Any) -> IdentityResult:
@@ -160,6 +211,9 @@ class IdentityMapper:
             if text in self.player_id_to_key:
                 return IdentityResult(self.player_id_to_key[text], None)
 
+            if text in self.referral_code_to_key:
+                return IdentityResult(self.referral_code_to_key[text], None)
+
         phone = normalize_phone(value)
         if phone:
             player_key = self.phone_to_key.get(phone)
@@ -171,3 +225,23 @@ class IdentityMapper:
                 return IdentityResult(None, "test_pattern")
 
         return IdentityResult(None, "unknown")
+
+
+def _choose_phone_owner(players: list[dict[str, Any]]) -> dict[str, Any]:
+    """Resolve reused phones: prefer non-deleted player, then latest createdAt."""
+    return max(
+        players,
+        key=lambda player: (
+            not bool(player.get("isDeleted", False)),
+            _created_at_sort_value(player.get("createdAt")),
+            str(player.get("_id")),
+        ),
+    )
+
+
+def _created_at_sort_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
