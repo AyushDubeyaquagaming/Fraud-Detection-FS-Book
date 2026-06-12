@@ -25,6 +25,8 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+CLAUDE.md
+PLAN.md
 
 # PyInstaller
 #   Usually these files are written by a python script from a template
@@ -216,3 +218,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project: data outputs (parquet stage files) — keep the dir, ignore contents
+/data/*
+!/data/.gitkeep
