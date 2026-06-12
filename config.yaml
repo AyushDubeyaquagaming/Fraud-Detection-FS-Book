@@ -20,9 +20,57 @@ collections:
   deposits: deposittransactions    # 124 docs
   withdrawals: withdrawaltransactions  # 74 docs
   activity: useractivitylogs       # playerId = phone; ip_address is an XFF array; 3,461 docs
+  bonus: bonustransactions         # lifecycle bonus ledger
+  logins: loginlogs                # device fingerprint login ledger
+  registration_otps: playerresgistrationotps  # pre-registration phone evidence
+  walletaccounts: walletaccounts
+  cashaccounts: cashaccounts
   # Other money-ish collections seen (clarify roles in Phase 1):
   #   gateway-payment-transactions (369), payouttransactions (137),
   #   bonustransactions (56), betting-tax-transactions (306), wht-transactions (131)
+
+flatten:
+  # Currencies are preserved per table. Do not compare/sum across these groups.
+  currencies:
+    bets: INR
+    money: UGX
+
+  withdrawals:
+    status_order:
+      initiated: 1
+      pending: 2
+      failed: 3
+      declined: 4
+      completed: 5
+
+  money_flags:
+    deposit_money_in_statuses:
+      - completed
+    withdrawal_money_out_statuses:
+      - completed
+    pending_withdrawal_statuses:
+      - initiated
+      - pending
+    excluded_deposit_money_in_statuses:
+      - manual_reconciliation
+
+  bonus:
+    ASSUMED_DEFAULT: UGX  # ASSUMED - bonustransactions has no currency field.
+    allowed_transaction_types:
+      - ALLOCATED
+      - RELEASE
+      - CONSUME
+      - EXPIRED
+
+  unjoined:
+    sample_ids_per_class: 10
+    known_orphan_wallet_ids:
+      - "0751231231"
+      - "0754321012"
+
+  players:
+    assumed_missing_is_deleted: false
+    assumed_missing_archived: false
 
 # Cloudflare CIDR ranges used to strip CDN edges from ip_address chains.
 # NOTE (Phase 1): useractivitylogs.ip_address is a COMMA-SEPARATED STRING

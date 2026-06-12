@@ -4,7 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from frauddet.identity import is_objectid_hex, looks_like_test_number, normalize_phone
+from frauddet.identity import IdentityMapper, is_objectid_hex, looks_like_test_number, normalize_phone
 
 
 def test_three_live_formats_collapse_to_same_subscriber():
@@ -59,6 +59,42 @@ def test_looks_like_test_number_passes_ordinary_numbers():
     assert not looks_like_test_number("702133888")  # '888' alone is not enough
     assert not looks_like_test_number(None)
     assert not looks_like_test_number("")
+
+
+def test_identity_mapper_resolves_phone_forms_and_player_id():
+    mapper = IdentityMapper.from_players(
+        [
+            {
+                "_id": "6a0ea9ff174ad3c431d9e16d",
+                "username": "0757575757",
+                "contactNo": "0757575757",
+                "playerId": 10003905,
+            }
+        ]
+    )
+
+    assert mapper.resolve("0757575757").player_key == "6a0ea9ff174ad3c431d9e16d"
+    assert mapper.resolve("757575757").player_key == "6a0ea9ff174ad3c431d9e16d"
+    assert mapper.resolve("+256 757 575 757").player_key == "6a0ea9ff174ad3c431d9e16d"
+    assert mapper.resolve("10003905").player_key == "6a0ea9ff174ad3c431d9e16d"
+
+
+def test_identity_mapper_resolves_players_objectid_hex():
+    key = "6a0ea9ff174ad3c431d9e16d"
+    mapper = IdentityMapper.from_players([{"_id": key, "username": "0757575757"}])
+
+    assert mapper.resolve(key.upper()).player_key == key
+
+
+def test_identity_mapper_classifies_junk_and_unresolvable_inputs():
+    mapper = IdentityMapper.from_players(
+        [{"_id": "6a0ea9ff174ad3c431d9e16d", "username": "0757575757"}],
+        [{"contactNo": "0759999999"}],
+    )
+
+    assert mapper.resolve("not-a-player").unjoined_class == "unknown"
+    assert mapper.resolve("0759999999").unjoined_class == "pre_registration"
+    assert mapper.resolve("0751111111").unjoined_class == "test_pattern"
 
 
 if __name__ == "__main__":
