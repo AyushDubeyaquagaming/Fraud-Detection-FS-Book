@@ -154,7 +154,15 @@ def flatten_players(docs: Iterable[dict[str, Any]], mapper: IdentityMapper) -> p
     fcfg = config.load_config()["flatten"]
     rows: list[dict[str, Any]] = []
     for doc in docs:
-        referred_by = mapper.resolve(doc.get("referredBy")) if doc.get("referredBy") else IdentityResult(None, None)
+        referred_by = (
+            mapper.resolve(
+                doc.get("referredBy"),
+                allow_player_id=True,
+                allow_referral_code=True,
+            )
+            if doc.get("referredBy")
+            else IdentityResult(None, None)
+        )
         rows.append(
             {
                 "player_key": str(doc.get("_id")),
@@ -188,9 +196,11 @@ def flatten_players(docs: Iterable[dict[str, Any]], mapper: IdentityMapper) -> p
 
 def flatten_bets(docs: Iterable[dict[str, Any]], mapper: IdentityMapper) -> pd.DataFrame:
     """Flatten `bet_transactions` to one row per ticket."""
+    target_currency = config.load_config()["flatten"]["currencies"]["bets"]
     rows: list[dict[str, Any]] = []
     for doc in docs:
         ident = mapper.resolve(doc.get("loginId"))
+        source_currency = doc.get("currency")
         parts = doc.get("betParts") or []
         odds = [_as_float(part.get("odds")) for part in parts if _as_float(part.get("odds")) is not None]
         sports = sorted({str(part.get("sportName")) for part in parts if part.get("sportName")})
@@ -209,9 +219,10 @@ def flatten_bets(docs: Iterable[dict[str, Any]], mapper: IdentityMapper) -> pd.D
                 "payout": doc.get("payout"),
                 "potential_payout": doc.get("potentialPayout"),
                 "total_odds": _as_float(doc.get("totalOdds")),
-                "currency": doc.get("currency"),
+                "currency": _normalized_bet_currency(source_currency, target_currency),
+                "source_currency": source_currency,
                 "created_at": _utc(doc.get("createdDate") or doc.get("createdAt")),
-                "settled_at_proxy": _utc(doc.get("updatedAt")),
+                "settled_at": _utc(doc.get("updatedAt")),
                 "bet_type": doc.get("betType"),
                 "n_selections": len(parts),
                 "min_part_odds": min(odds) if odds else None,
@@ -234,8 +245,9 @@ def flatten_bets(docs: Iterable[dict[str, Any]], mapper: IdentityMapper) -> pd.D
         "potential_payout",
         "total_odds",
         "currency",
+        "source_currency",
         "created_at",
-        "settled_at_proxy",
+        "settled_at",
         "bet_type",
         "n_selections",
         "min_part_odds",
@@ -830,6 +842,15 @@ def _valid_fingerprint(value: Any) -> str | None:
     text = str(value).strip()
     if text == "not-found" or len(text) != 64:
         return None
+    return text
+
+
+def _normalized_bet_currency(source_currency: Any, target_currency: str) -> str | None:
+    if source_currency is None:
+        return None
+    text = str(source_currency).strip()
+    if text.upper() == "INR" and target_currency.upper() == "UGX":
+        return target_currency
     return text
 
 

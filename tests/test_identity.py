@@ -61,7 +61,7 @@ def test_looks_like_test_number_passes_ordinary_numbers():
     assert not looks_like_test_number("")
 
 
-def test_identity_mapper_resolves_phone_forms_and_player_id():
+def test_identity_mapper_resolves_phone_forms_but_not_player_id_by_default():
     mapper = IdentityMapper.from_players(
         [
             {
@@ -76,7 +76,8 @@ def test_identity_mapper_resolves_phone_forms_and_player_id():
     assert mapper.resolve("0757575757").player_key == "6a0ea9ff174ad3c431d9e16d"
     assert mapper.resolve("757575757").player_key == "6a0ea9ff174ad3c431d9e16d"
     assert mapper.resolve("+256 757 575 757").player_key == "6a0ea9ff174ad3c431d9e16d"
-    assert mapper.resolve("10003905").player_key == "6a0ea9ff174ad3c431d9e16d"
+    assert mapper.resolve("10003905").player_key is None
+    assert mapper.resolve("10003905", allow_player_id=True).player_key == "6a0ea9ff174ad3c431d9e16d"
 
 
 def test_identity_mapper_resolves_players_objectid_hex():
@@ -146,12 +147,13 @@ def test_identity_mapper_phone_collision_tiebreaks_latest_created_at():
     assert mapper.resolve("0757575757").player_key == "newer-player"
 
 
-def test_identity_mapper_resolves_referral_code_exact_match():
+def test_identity_mapper_resolves_referral_code_only_when_allowed():
     mapper = IdentityMapper.from_players(
         [{"_id": "referrer", "username": "0757575757", "referralCode": "ABC123"}]
     )
 
-    assert mapper.resolve("ABC123").player_key == "referrer"
+    assert mapper.resolve("ABC123").player_key is None
+    assert mapper.resolve("ABC123", allow_referral_code=True).player_key == "referrer"
 
 
 if __name__ == "__main__":

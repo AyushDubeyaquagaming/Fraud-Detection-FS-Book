@@ -195,8 +195,18 @@ class IdentityMapper:
             phone_collisions=phone_collisions,
         )
 
-    def resolve(self, value: Any) -> IdentityResult:
+    def resolve(
+        self,
+        value: Any,
+        *,
+        allow_player_id: bool = False,
+        allow_referral_code: bool = False,
+    ) -> IdentityResult:
         """Resolve a source identifier to `(player_key, unjoined_class)`.
+
+        Source event tables resolve only verified join forms by default:
+        normalized phone and `players._id` hex. Player IDs and referral codes
+        are player-profile fields, so callers must opt in explicitly.
 
         `unjoined_class` is only populated when no player is resolved, and is
         one of `pre_registration`, `test_pattern`, or `unknown`.
@@ -208,10 +218,10 @@ class IdentityMapper:
                 if player_key:
                     return IdentityResult(player_key, None)
 
-            if text in self.player_id_to_key:
+            if allow_player_id and text in self.player_id_to_key:
                 return IdentityResult(self.player_id_to_key[text], None)
 
-            if text in self.referral_code_to_key:
+            if allow_referral_code and text in self.referral_code_to_key:
                 return IdentityResult(self.referral_code_to_key[text], None)
 
         phone = normalize_phone(value)

@@ -32,7 +32,7 @@ collections:
 flatten:
   # Currencies are preserved per table. Do not compare/sum across these groups.
   currencies:
-    bets: INR
+    bets: UGX
     money: UGX
 
   withdrawals:
@@ -46,13 +46,12 @@ flatten:
   money_flags:
     deposit_money_in_statuses:
       - completed
+      - manual_reconciliation
     withdrawal_money_out_statuses:
       - completed
     pending_withdrawal_statuses:
       - initiated
       - pending
-    excluded_deposit_money_in_statuses:
-      - manual_reconciliation
 
   bonus:
     ASSUMED_DEFAULT: UGX  # ASSUMED - bonustransactions has no currency field.

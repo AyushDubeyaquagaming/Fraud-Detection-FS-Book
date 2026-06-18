@@ -9,9 +9,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from frauddet.flatten import (
     analyze_withdrawal_account_resolution,
     collapse_withdrawal_lifecycles,
+    flatten_bets,
     flatten_bonus,
     flatten_logins,
     flatten_money,
+    flatten_players,
 )
 from frauddet.identity import IdentityMapper
 
@@ -133,7 +135,7 @@ def test_money_status_flags_match_config_whitelists():
     money = flatten_money(deposits, withdrawals, _mapper()).set_index("transaction_id")
 
     assert bool(money.loc["dep-completed", "is_money_in"]) is True
-    assert bool(money.loc["dep-manual", "is_money_in"]) is False
+    assert bool(money.loc["dep-manual", "is_money_in"]) is True
     assert bool(money.loc["wd-completed", "is_money_out"]) is True
     assert bool(money.loc["wd-pending", "is_pending_withdrawal"]) is True
     assert bool(money.loc["wd-pending", "is_money_out"]) is False
@@ -194,6 +196,50 @@ def test_flatten_logins_marks_staff_and_fingerprint_sentinel():
     assert bool(logins.loc["player-login", "success"]) is True
     assert logins.loc["staff-login", "unjoined_class"] == "staff"
     assert pd.isna(logins.loc["staff-login", "fingerprint"])
+
+
+def test_flatten_players_opts_into_referred_by_player_id_resolution():
+    docs = [
+        {
+            "_id": "referrer",
+            "username": "0757575757",
+            "contactNo": "0757575757",
+            "playerId": 10003905,
+        },
+        {
+            "_id": "referred",
+            "username": "0757676767",
+            "contactNo": "0757676767",
+            "referredBy": 10003905,
+        },
+    ]
+    mapper = IdentityMapper.from_players(docs)
+
+    players = flatten_players(docs, mapper).set_index("player_key")
+
+    assert players.loc["referred", "referred_by_key"] == "referrer"
+
+
+def test_flatten_bets_relabels_mislabeled_inr_to_ugx_and_renames_settlement_time():
+    bets = flatten_bets(
+        [
+            {
+                "ticketId": "ticket-1",
+                "loginId": "0757575757",
+                "stake": 1000,
+                "currency": "INR",
+                "createdDate": "2026-06-01T10:00:00Z",
+                "updatedAt": "2026-06-01T10:05:00Z",
+            }
+        ],
+        _mapper(),
+    )
+    row = bets.iloc[0]
+
+    assert row["currency"] == "UGX"
+    assert row["source_currency"] == "INR"
+    assert "settled_at_proxy" not in bets.columns
+    assert row["settled_at"] == pd.Timestamp("2026-06-01T10:05:00Z")
 
 
 def test_bonus_ref_kind_distinguishes_missing_and_unresolved():
