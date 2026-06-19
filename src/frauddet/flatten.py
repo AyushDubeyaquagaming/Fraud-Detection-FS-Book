@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
+import hashlib
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -152,6 +153,7 @@ def rebuild_all_flattened_outputs_from_db(db: Database, output_dir: Path) -> Bui
 def flatten_players(docs: Iterable[dict[str, Any]], mapper: IdentityMapper) -> pd.DataFrame:
     """Flatten `players` to one row per player."""
     fcfg = config.load_config()["flatten"]
+    identity_hash_salt = config.get_identity_hash_salt()
     rows: list[dict[str, Any]] = []
     for doc in docs:
         referred_by = (
@@ -173,12 +175,16 @@ def flatten_players(docs: Iterable[dict[str, Any]], mapper: IdentityMapper) -> p
                     "isDeleted", fcfg["players"]["assumed_missing_is_deleted"]
                 ),
                 "archived": doc.get("archived", fcfg["players"]["assumed_missing_archived"]),
+                "nin_hash": _salted_hash(_normalize_nin(doc.get("nin")), identity_hash_salt),
+                "email_hash": _salted_hash(_normalize_email(doc.get("emailId")), identity_hash_salt),
                 "referred_by_key": referred_by.player_key,
                 "nationality": doc.get("nationality"),
                 "dob": doc.get("DOB"),
                 "username_raw": doc.get("username"),
             }
         )
+        # TODO: Add bank/passport salted hash keys only after prod data shows
+        # bankDetails is populated and passportDetails is not default-stubbed.
     columns = [
         "player_key",
         "phone",
@@ -186,6 +192,8 @@ def flatten_players(docs: Iterable[dict[str, Any]], mapper: IdentityMapper) -> p
         "kyc_status",
         "is_deleted",
         "archived",
+        "nin_hash",
+        "email_hash",
         "referred_by_key",
         "nationality",
         "dob",
@@ -852,6 +860,29 @@ def _normalized_bet_currency(source_currency: Any, target_currency: str) -> str 
     if text.upper() == "INR" and target_currency.upper() == "UGX":
         return target_currency
     return text
+
+
+def _normalize_nin(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return "".join(text.split()).upper()
+
+
+def _normalize_email(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    return text or None
+
+
+def _salted_hash(value: str | None, salt: str) -> str | None:
+    if value is None:
+        return None
+    payload = f"{salt}\0{value}".encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _login_success(doc: dict[str, Any]) -> bool | None:

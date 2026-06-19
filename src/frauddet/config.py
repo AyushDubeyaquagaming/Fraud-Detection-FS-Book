@@ -50,5 +50,17 @@ def get_database_name() -> str:
 
 
 def get_collection_names() -> dict[str, str | None]:
-    """Configured collection names (some may be None until verified in Phase 1)."""
+    """Configured source collection names verified in Phase 1."""
     return load_config()["collections"]
+
+
+def get_identity_hash_salt() -> str:
+    """Return the secret salt used for one-way identity-document hashes."""
+    load_dotenv(ENV_PATH)
+    var = load_config()["identity_hashing"]["salt_env_var"]
+    salt = os.environ.get(var)
+    if not salt:
+        raise RuntimeError(
+            f"Identity hash salt not found. Set {var} in {ENV_PATH}; never commit it."
+        )
+    return salt

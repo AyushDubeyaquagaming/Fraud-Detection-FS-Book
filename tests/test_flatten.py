@@ -1,4 +1,5 @@
 """Tests for Phase 2 flattening rules."""
+import os
 import sys
 from pathlib import Path
 
@@ -19,12 +20,17 @@ from frauddet.identity import IdentityMapper
 
 
 PLAYER_KEY = "6a0ea9ff174ad3c431d9e16d"
+TEST_HASH_SALT = "unit-test-identity-hash-salt"
 
 
 def _mapper():
     return IdentityMapper.from_players(
         [{"_id": PLAYER_KEY, "username": "0757575757", "contactNo": "0757575757"}]
     )
+
+
+def _set_test_hash_salt():
+    os.environ["IDENTITY_HASH_SALT"] = TEST_HASH_SALT
 
 
 def test_withdrawal_lifecycle_collapse_keeps_most_advanced_status():
@@ -199,6 +205,7 @@ def test_flatten_logins_marks_staff_and_fingerprint_sentinel():
 
 
 def test_flatten_players_opts_into_referred_by_player_id_resolution():
+    _set_test_hash_salt()
     docs = [
         {
             "_id": "referrer",
@@ -218,6 +225,58 @@ def test_flatten_players_opts_into_referred_by_player_id_resolution():
     players = flatten_players(docs, mapper).set_index("player_key")
 
     assert players.loc["referred", "referred_by_key"] == "referrer"
+
+
+def test_flatten_players_hashes_identity_documents_without_raw_values():
+    _set_test_hash_salt()
+    docs = [
+        {
+            "_id": "p1",
+            "username": "0757575757",
+            "contactNo": "0757575757",
+            "nin": " ab 123 cd ",
+            "emailId": "Test@Example.COM ",
+        },
+        {
+            "_id": "p2",
+            "username": "0757676767",
+            "contactNo": "0757676767",
+            "nin": "AB123CD",
+            "emailId": " test@example.com",
+        },
+        {
+            "_id": "p3",
+            "username": "0757777777",
+            "contactNo": "0757777777",
+            "nin": "DIFFERENT",
+            "emailId": "other@example.com",
+        },
+        {
+            "_id": "p4",
+            "username": "0757878787",
+            "contactNo": "0757878787",
+            "nin": "   ",
+            "emailId": "",
+        },
+    ]
+
+    players = flatten_players(docs, IdentityMapper.from_players(docs)).set_index("player_key")
+
+    assert players.loc["p1", "nin_hash"] == players.loc["p2", "nin_hash"]
+    assert players.loc["p1", "email_hash"] == players.loc["p2", "email_hash"]
+    assert players.loc["p1", "nin_hash"] != players.loc["p3", "nin_hash"]
+    assert players.loc["p1", "email_hash"] != players.loc["p3", "email_hash"]
+    assert pd.isna(players.loc["p4", "nin_hash"])
+    assert pd.isna(players.loc["p4", "email_hash"])
+
+    rendered_values = {
+        str(value)
+        for value in players[["nin_hash", "email_hash"]].to_numpy().ravel().tolist()
+        if pd.notna(value)
+    }
+    assert all(len(value) == 64 for value in rendered_values)
+    assert "AB123CD" not in rendered_values
+    assert "test@example.com" not in rendered_values
 
 
 def test_flatten_bets_relabels_mislabeled_inr_to_ugx_and_renames_settlement_time():

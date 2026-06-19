@@ -9,25 +9,23 @@ mongo:
   # data is read from booktestdbgp_test.
   database: booktestdbgp_test
 
-# Collection names. Some are UNVERIFIED until Phase 1 (Notebook 01) confirms them
-# against the live DB — names below are best-guess from CLAUDE.md and will be
-# corrected at REPORT-BACK GATE 1.
+# Collection names verified in Phase 1. Row counts live only in snapshot
+# manifests, not in config.
 collections:
-  players: players                 # canonical key = _id (-> player_key); 59 docs
-  bets: bet_transactions           # one doc per bet ticket; loginId = phone; 330 docs
+  players: players                 # canonical key = _id (-> player_key)
+  bets: bet_transactions           # one doc per bet ticket; loginId = phone
   # Money is SPLIT across two collections (not one with a transactionType field,
   # as CLAUDE.md guessed). Confirmed to exist in Phase 0; schema verified in Phase 1.
-  deposits: deposittransactions    # 124 docs
-  withdrawals: withdrawaltransactions  # 74 docs
-  activity: useractivitylogs       # playerId = phone; ip_address is an XFF array; 3,461 docs
+  deposits: deposittransactions
+  withdrawals: withdrawaltransactions
+  activity: useractivitylogs       # playerId = phone; ip_address is an XFF string
   bonus: bonustransactions         # lifecycle bonus ledger
   logins: loginlogs                # device fingerprint login ledger
   registration_otps: playerresgistrationotps  # pre-registration phone evidence
   walletaccounts: walletaccounts
   cashaccounts: cashaccounts
-  # Other money-ish collections seen (clarify roles in Phase 1):
-  #   gateway-payment-transactions (369), payouttransactions (137),
-  #   bonustransactions (56), betting-tax-transactions (306), wht-transactions (131)
+  # Other money-ish collections seen: gateway-payment-transactions,
+  # payouttransactions, betting-tax-transactions, wht-transactions.
 
 flatten:
   # Currencies are preserved per table. Do not compare/sum across these groups.
@@ -71,6 +69,9 @@ flatten:
     assumed_missing_is_deleted: false
     assumed_missing_archived: false
 
+identity_hashing:
+  salt_env_var: IDENTITY_HASH_SALT
+
 # Cloudflare CIDR ranges used to strip CDN edges from ip_address chains.
 # NOTE (Phase 1): useractivitylogs.ip_address is a COMMA-SEPARATED STRING
 # (e.g. "80.227.165.206, 162.159.122.165"), NOT an array as CLAUDE.md states.
@@ -101,4 +102,4 @@ thresholds: {}
 phase3:
   # Phase 3 feature work must read the frozen Phase 2 parquet contracts here,
   # not the mutable top-level data/*.parquet outputs rebuilt by Notebook 02.
-  input_dir: data/snapshot_phase3_2026-06-19
+  input_dir: data/snapshot_phase3_2026-06-19b
