@@ -97,3 +97,8 @@ cloudflare_cidrs:
 # All detection thresholds live here, never inline. Every value below is a
 # PLACEHOLDER — recalibrate on production data. None are used yet (Phase 4).
 thresholds: {}
+
+phase3:
+  # Phase 3 feature work must read the frozen Phase 2 parquet contracts here,
+  # not the mutable top-level data/*.parquet outputs rebuilt by Notebook 02.
+  input_dir: data/snapshot_phase3_2026-06-19
