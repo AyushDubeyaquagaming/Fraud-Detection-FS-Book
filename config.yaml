@@ -96,8 +96,10 @@ cloudflare_cidrs:
   - 131.0.72.0/22
 
 # All detection thresholds live here, never inline. Every value below is a
-# PLACEHOLDER — recalibrate on production data. None are used yet (Phase 4).
-thresholds: {}
+# PLACEHOLDER — recalibrate on production data.
+thresholds:
+  ma_cocreation_window_minutes: 15  # PLACEHOLDER - feature window only.
+  ma_referral_fanout_threshold: 5   # PLACEHOLDER - Phase 4 scoring only.
 
 phase3:
   # Phase 3 feature work must read the frozen Phase 2 parquet contracts here,
