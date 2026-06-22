@@ -103,6 +103,13 @@ thresholds:
   # PLACEHOLDER - fingerprints above this player cardinality are treated as
   # shared/public/office devices, not evidence of one operator.
   ma_device_max_cardinality: 10
+  pay_fast_window_minutes: 60          # PLACEHOLDER - Y for fast exits.
+  pay_pct_withdrawn_threshold: 0.80    # PLACEHOLDER - X share of deposit.
+  pay_intervening_turnover_pct: 0.10   # PLACEHOLDER - Z share of deposit.
+  pay_min_deposit_denominator: 10000   # PLACEHOLDER - UGX ratio floor.
+  pay_fast_withdrawal_count_gate: 2    # PLACEHOLDER - Phase 4 scoring only.
+  pay_manual_recon_ratio_threshold: 0.25  # PLACEHOLDER - Phase 4 scoring only.
+  pay_manual_recon_min_count: 2        # PLACEHOLDER - Phase 4 scoring only.
 
 phase3:
   # Phase 3 feature work must read the frozen Phase 2 parquet contracts here,

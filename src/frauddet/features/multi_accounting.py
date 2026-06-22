@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-import json
 from pathlib import Path
 import re
 from typing import Any
@@ -13,17 +12,12 @@ import pandas as pd
 from .. import config
 from ..snapshot import load_snapshot
 from .linkage import LinkageIndex, build_frame_linkage
+from .output import FeatureBuildResult, FeatureSpec, materialize_feature_group
 from .schema import FeatureResult, FeatureScoringRole, FeatureStrength
+from .withdrawals import WithdrawalContext, build_withdrawal_context
 
 
 _VALID_FINGERPRINT = re.compile(r"^[0-9a-fA-F]{64}$")
-
-
-@dataclass(frozen=True)
-class FeatureSpec:
-    strength: FeatureStrength
-    scoring_role: FeatureScoringRole
-    value_kind: str
 
 
 FEATURE_SPECS: dict[str, FeatureSpec] = {
@@ -59,19 +53,13 @@ class MultiAccountLinkages:
         }
 
 
-@dataclass(frozen=True)
-class FeatureBuildResult:
-    player_features: pd.DataFrame
-    feature_evidence: pd.DataFrame
-    output_paths: dict[str, Path]
-
-
 def build_multi_account_linkages(
     players: pd.DataFrame,
     logins: pd.DataFrame,
     money: pd.DataFrame,
     *,
     device_max_cardinality: int | None = None,
+    withdrawal_context: WithdrawalContext | None = None,
 ) -> MultiAccountLinkages:
     """Build reusable population-wide one-hop linkage indexes."""
     population = set(players["player_key"].astype(str))
@@ -84,12 +72,7 @@ def build_multi_account_linkages(
         & logins["fingerprint"].notna()
         & logins["fingerprint"].astype(str).str.fullmatch(_VALID_FINGERPRINT)
     ]
-    completed_withdrawals = money[
-        money["player_key"].notna()
-        & money["player_key"].astype(str).isin(population)
-        & money["txn_type"].eq("WITHDRAWAL")
-        & money["is_money_out"].fillna(False).astype(bool)
-    ]
+    withdrawals = withdrawal_context or build_withdrawal_context(players, money)
     device_all = build_frame_linkage(
         valid_logins,
         key_type="fingerprint",
@@ -110,18 +93,11 @@ def build_multi_account_linkages(
         ),
         device_all=device_all,
         device=device_all.with_max_cardinality(device_max_cardinality),
-        recipient=build_frame_linkage(
-            completed_withdrawals,
-            key_type="recipient_normalized",
-            key_column="recipient_normalized",
-            record_id_column="transaction_id",
-        ),
+        recipient=withdrawals.recipient,
         phone=build_frame_linkage(
             player_rows, key_type="normalized_phone", key_column="phone"
         ),
-        completed_withdrawal_players=frozenset(
-            completed_withdrawals["player_key"].astype(str).unique()
-        ),
+        completed_withdrawal_players=withdrawals.completed_players,
     )
 
 
@@ -133,6 +109,7 @@ def build_multi_accounting_features(
     output_dir: Path | None = None,
     write_outputs: bool = True,
     device_max_cardinality: int | None = None,
+    withdrawal_context: WithdrawalContext | None = None,
 ) -> FeatureBuildResult:
     """Build exactly the Phase 3 v1 multi-accounting feature group."""
     players = load_snapshot("players") if players is None else players.copy()
@@ -149,6 +126,7 @@ def build_multi_accounting_features(
         logins,
         money,
         device_max_cardinality=device_max_cardinality,
+        withdrawal_context=withdrawal_context,
     )
     referred_players = _referred_players(players)
     created_at = players.set_index("player_key")["created_at"].to_dict()
@@ -156,58 +134,25 @@ def build_multi_accounting_features(
         config.load_config()["thresholds"]["ma_cocreation_window_minutes"]
     )
 
-    feature_rows: list[dict[str, Any]] = []
-    evidence_rows: list[dict[str, str]] = []
-    for player_key in sorted(players["player_key"]):
-        player = players.loc[players["player_key"].eq(player_key)].iloc[0]
-        results = _player_results(
+    players_by_key = players.set_index("player_key", drop=False)
+
+    def results_for(player_key: str) -> dict[str, FeatureResult]:
+        return _player_results(
             player_key,
-            player,
+            players_by_key.loc[player_key],
             linkages,
             referred_players,
             created_at,
             cocreation_minutes,
         )
-        feature_row: dict[str, Any] = {"player_key": player_key}
-        for feature_name in FEATURE_SPECS:
-            result = results[feature_name]
-            feature_row[feature_name] = result.feature_value
-            feature_row[f"{feature_name}__null_reason"] = result.feature_null_reason
-            feature_row[f"{feature_name}__strength"] = result.feature_strength
-            feature_row[f"{feature_name}__scoring_role"] = result.feature_scoring_role
-            evidence_rows.append(
-                {
-                    "player_key": player_key,
-                    "feature_name": feature_name,
-                    "feature_evidence": json.dumps(
-                        result.feature_evidence,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                        default=str,
-                    ),
-                }
-            )
-        feature_rows.append(feature_row)
 
-    feature_frame = pd.DataFrame(feature_rows)
-    _apply_feature_dtypes(feature_frame)
-    evidence_frame = pd.DataFrame(
-        evidence_rows,
-        columns=["player_key", "feature_name", "feature_evidence"],
-    ).sort_values(["player_key", "feature_name"], kind="mergesort").reset_index(drop=True)
-
-    output_paths: dict[str, Path] = {}
-    if write_outputs:
-        target = output_dir or config.DATA_DIR
-        target.mkdir(parents=True, exist_ok=True)
-        output_paths = {
-            "player_features": target / "player_features.parquet",
-            "feature_evidence": target / "player_features_evidence.parquet",
-        }
-        feature_frame.to_parquet(output_paths["player_features"], index=False)
-        evidence_frame.to_parquet(output_paths["feature_evidence"], index=False)
-
-    return FeatureBuildResult(feature_frame, evidence_frame, output_paths)
+    return materialize_feature_group(
+        players["player_key"].tolist(),
+        FEATURE_SPECS,
+        results_for,
+        output_dir=output_dir,
+        write_outputs=write_outputs,
+    )
 
 
 def _player_results(
@@ -388,20 +333,3 @@ def _device_count_result(player_key: str, device: LinkageIndex) -> FeatureResult
         "weak",
         "context_only",
     )
-
-
-def _apply_feature_dtypes(frame: pd.DataFrame) -> None:
-    for feature_name, spec in FEATURE_SPECS.items():
-        if spec.value_kind == "count":
-            frame[feature_name] = frame[feature_name].astype("Int64")
-        elif spec.value_kind == "bool":
-            frame[feature_name] = frame[feature_name].astype("boolean")
-        frame[f"{feature_name}__null_reason"] = frame[
-            f"{feature_name}__null_reason"
-        ].astype("string")
-        frame[f"{feature_name}__strength"] = frame[
-            f"{feature_name}__strength"
-        ].astype("string")
-        frame[f"{feature_name}__scoring_role"] = frame[
-            f"{feature_name}__scoring_role"
-        ].astype("string")
