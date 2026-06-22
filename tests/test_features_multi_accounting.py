@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -11,6 +12,7 @@ from frauddet.features.multi_accounting import (
     FEATURE_SPECS,
     build_multi_accounting_features,
 )
+from frauddet.features.schema import FeatureResult
 
 
 def _players(rows):
@@ -47,12 +49,13 @@ def _money(rows=()):
     )
 
 
-def _build(players, logins=None, money=None):
+def _build(players, logins=None, money=None, device_max_cardinality=None):
     return build_multi_accounting_features(
         players=players,
         logins=_logins() if logins is None else logins,
         money=_money() if money is None else money,
         write_outputs=False,
+        device_max_cardinality=device_max_cardinality,
     )
 
 
@@ -130,6 +133,70 @@ def test_null_contract_absent_fingerprint_is_null_absent_nin_is_zero():
     )
     assert pd.isna(row["ma_device_count"])
     assert row["ma_device_count__null_reason"] == "no_valid_fingerprint_logins"
+    assert row["ma_referral_fanout_count"] == 0
+    assert _evidence(result, "p1", "ma_referral_fanout_count") == []
+    assert _evidence(result, "p1", "ma_device_count") == []
+
+
+def test_zero_allows_empty_evidence_but_nonzero_requires_evidence():
+    zero = FeatureResult(0, [], None, "weak", "supporting")
+    null = FeatureResult(
+        None,
+        [],
+        "no_valid_fingerprint_logins",
+        "weak",
+        "context_only",
+    )
+
+    assert zero.feature_evidence == []
+    assert null.feature_evidence == []
+    with pytest.raises(ValueError, match="Non-zero feature values require"):
+        FeatureResult(1, [], None, "strong", "scoring")
+
+
+def test_device_cardinality_cap_blocks_links_and_corroboration_only_over_cap():
+    over_cap = "a" * 64
+    within_cap = "b" * 64
+    players = _players(
+        [
+            ["p1", "700000001", "2026-06-01T10:00:00Z", None, None, None],
+            ["p2", "700000002", "2026-06-01T10:05:00Z", None, None, "p1"],
+            ["p3", "700000003", "2026-06-01T10:10:00Z", None, None, None],
+            ["p4", "700000004", "2026-06-01T11:00:00Z", None, None, None],
+            ["p5", "700000005", "2026-06-01T11:05:00Z", None, None, "p4"],
+        ]
+    )
+    logins = _logins(
+        [
+            ["p1", "PLAYER", over_cap, "login-1"],
+            ["p2", "PLAYER", over_cap, "login-2"],
+            ["p3", "PLAYER", over_cap, "login-3"],
+            ["p4", "PLAYER", within_cap, "login-4"],
+            ["p5", "PLAYER", within_cap, "login-5"],
+        ]
+    )
+
+    result = _build(players, logins, device_max_cardinality=2)
+    features = result.player_features.set_index("player_key")
+
+    for player_key in ["p1", "p2", "p3"]:
+        assert features.loc[player_key, "ma_device_shared_account_count"] == 0
+        assert features.loc[player_key, "ma_cocreated_linked_count"] == 0
+        assert features.loc[player_key, "ma_device_count"] == 1
+        assert _evidence(result, player_key, "ma_device_shared_account_count") == []
+        assert over_cap not in json.dumps(
+            _evidence(result, player_key, "ma_cocreated_linked_count")
+        )
+    assert not features.loc["p2", "ma_referred_by_linked_account"]
+    assert _evidence(result, "p2", "ma_referred_by_linked_account") == []
+
+    for player_key in ["p4", "p5"]:
+        assert features.loc[player_key, "ma_device_shared_account_count"] == 1
+        assert features.loc[player_key, "ma_cocreated_linked_count"] == 1
+        assert within_cap in json.dumps(
+            _evidence(result, player_key, "ma_device_shared_account_count")
+        )
+    assert features.loc["p5", "ma_referred_by_linked_account"]
 
 
 def test_nonzero_scoring_features_always_have_evidence():

@@ -62,6 +62,36 @@ class LinkageIndex:
         other = self.player_to_keys.get(other_player_key, frozenset())
         return sorted(own & other)
 
+    def with_max_cardinality(self, max_players: int) -> "LinkageIndex":
+        """Return an index containing only keys observed on at most N players."""
+        if max_players < 1:
+            raise ValueError("max_players must be positive.")
+        allowed = {
+            key
+            for key, players in self.key_to_players.items()
+            if len(players) <= max_players
+        }
+        key_to_players = {
+            key: players
+            for key, players in self.key_to_players.items()
+            if key in allowed
+        }
+        player_to_keys: dict[str, frozenset[str]] = {}
+        for player, keys in self.player_to_keys.items():
+            kept = frozenset(key for key in keys if key in allowed)
+            if kept:
+                player_to_keys[player] = kept
+        return LinkageIndex(
+            key_type=self.key_type,
+            key_to_players=key_to_players,
+            player_to_keys=player_to_keys,
+            key_player_records={
+                key: player_records
+                for key, player_records in self.key_player_records.items()
+                if key in allowed
+            },
+        )
+
 
 def build_linkage_index(key_type: str, rows: Iterable[LinkageRow]) -> LinkageIndex:
     """Build a direct player/shared-key index from normalized observations."""

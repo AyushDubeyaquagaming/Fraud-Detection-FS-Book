@@ -17,3 +17,8 @@ hashes; no raw NIN/email is stored. Recipient numbers may be reviewer-visible.
 
 All linkage is one-hop. No connected-component or transitive expansion is
 performed.
+
+Device fingerprints whose player cardinality exceeds
+`thresholds.ma_device_max_cardinality` are treated as shared/public/office
+devices. They remain visible to `ma_device_count` as context, but cannot create
+device-sharing links or corroborate referral and co-creation features.

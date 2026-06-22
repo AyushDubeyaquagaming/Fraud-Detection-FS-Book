@@ -100,6 +100,9 @@ cloudflare_cidrs:
 thresholds:
   ma_cocreation_window_minutes: 15  # PLACEHOLDER - feature window only.
   ma_referral_fanout_threshold: 5   # PLACEHOLDER - Phase 4 scoring only.
+  # PLACEHOLDER - fingerprints above this player cardinality are treated as
+  # shared/public/office devices, not evidence of one operator.
+  ma_device_max_cardinality: 10
 
 phase3:
   # Phase 3 feature work must read the frozen Phase 2 parquet contracts here,

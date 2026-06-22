@@ -43,6 +43,7 @@ FEATURE_SPECS: dict[str, FeatureSpec] = {
 class MultiAccountLinkages:
     nin: LinkageIndex
     email: LinkageIndex
+    device_all: LinkageIndex
     device: LinkageIndex
     recipient: LinkageIndex
     phone: LinkageIndex
@@ -69,6 +70,8 @@ def build_multi_account_linkages(
     players: pd.DataFrame,
     logins: pd.DataFrame,
     money: pd.DataFrame,
+    *,
+    device_max_cardinality: int | None = None,
 ) -> MultiAccountLinkages:
     """Build reusable population-wide one-hop linkage indexes."""
     population = set(players["player_key"].astype(str))
@@ -87,6 +90,16 @@ def build_multi_account_linkages(
         & money["txn_type"].eq("WITHDRAWAL")
         & money["is_money_out"].fillna(False).astype(bool)
     ]
+    device_all = build_frame_linkage(
+        valid_logins,
+        key_type="fingerprint",
+        key_column="fingerprint",
+        record_id_column="source_id",
+    )
+    if device_max_cardinality is None:
+        device_max_cardinality = int(
+            config.load_config()["thresholds"]["ma_device_max_cardinality"]
+        )
 
     return MultiAccountLinkages(
         nin=build_frame_linkage(
@@ -95,12 +108,8 @@ def build_multi_account_linkages(
         email=build_frame_linkage(
             player_rows, key_type="email_hash", key_column="email_hash"
         ),
-        device=build_frame_linkage(
-            valid_logins,
-            key_type="fingerprint",
-            key_column="fingerprint",
-            record_id_column="source_id",
-        ),
+        device_all=device_all,
+        device=device_all.with_max_cardinality(device_max_cardinality),
         recipient=build_frame_linkage(
             completed_withdrawals,
             key_type="recipient_normalized",
@@ -123,6 +132,7 @@ def build_multi_accounting_features(
     money: pd.DataFrame | None = None,
     output_dir: Path | None = None,
     write_outputs: bool = True,
+    device_max_cardinality: int | None = None,
 ) -> FeatureBuildResult:
     """Build exactly the Phase 3 v1 multi-accounting feature group."""
     players = load_snapshot("players") if players is None else players.copy()
@@ -134,7 +144,12 @@ def build_multi_accounting_features(
     if players["player_key"].duplicated().any():
         raise ValueError("players input must contain one row per player_key.")
 
-    linkages = build_multi_account_linkages(players, logins, money)
+    linkages = build_multi_account_linkages(
+        players,
+        logins,
+        money,
+        device_max_cardinality=device_max_cardinality,
+    )
     referred_players = _referred_players(players)
     created_at = players.set_index("player_key")["created_at"].to_dict()
     cocreation_minutes = float(
@@ -212,6 +227,7 @@ def _player_results(
             "strong",
             "scoring",
             null_reason="no_valid_fingerprint_logins",
+            measurement_index=linkages.device_all,
         ),
         "ma_withdrawal_recipient_shared_count": _link_count(
             linkages.recipient,
@@ -240,7 +256,7 @@ def _player_results(
             linkages,
             cocreation_minutes,
         ),
-        "ma_device_count": _device_count_result(player_key, linkages.device),
+        "ma_device_count": _device_count_result(player_key, linkages.device_all),
     }
     return results
 
@@ -253,8 +269,10 @@ def _link_count(
     *,
     null_reason: str | None = None,
     null_when_no_keys: bool = True,
+    measurement_index: LinkageIndex | None = None,
 ) -> FeatureResult:
-    has_keys = bool(index.player_to_keys.get(player_key))
+    measured_by = measurement_index or index
+    has_keys = bool(measured_by.player_to_keys.get(player_key))
     if null_reason and (not has_keys if null_when_no_keys else True):
         return FeatureResult(None, [], null_reason, strength, scoring_role)
     linked = index.linked_players(player_key)
