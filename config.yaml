@@ -120,3 +120,153 @@ phase3:
   # Phase 3 feature work must read the frozen Phase 2 parquet contracts here,
   # not the mutable top-level data/*.parquet outputs rebuilt by Notebook 02.
   input_dir: data/snapshot_phase3_2026-06-19b
+
+# Phase 4 rule scoring. Every threshold, point value, and band cut below is a
+# PLACEHOLDER - recalibrate on production labels and reviewer feedback.
+scoring:
+  bands:
+    medium_cut: 40   # PLACEHOLDER
+    high_cut: 80     # PLACEHOLDER
+  iforest:
+    enabled: true
+    weight: 0        # PLACEHOLDER - plumbing only, influences nothing in v1.
+    n_estimators: 100
+    random_state: 42
+  report_top_n: 20
+  weights:
+    R-MA-01: 35      # PLACEHOLDER
+    R-MA-02: 30      # PLACEHOLDER
+    R-MA-03: 25      # PLACEHOLDER
+    R-MA-04: 35      # PLACEHOLDER
+    R-MA-05: 40      # PLACEHOLDER
+    R-MA-06: 15      # PLACEHOLDER
+    R-MA-07: 10      # PLACEHOLDER
+    R-MA-08: 15      # PLACEHOLDER
+    R-PAY-01: 40     # PLACEHOLDER - includes the paired turnover ratio signal.
+    R-PAY-02: 35     # PLACEHOLDER
+    R-PAY-03: 10     # PLACEHOLDER
+    R-PAY-04: 15     # PLACEHOLDER
+    R-PAY-05: 8      # PLACEHOLDER
+    R-PAY-06: 8      # PLACEHOLDER
+    R-PAY-07: 8      # PLACEHOLDER
+    R-PAY-08: 8      # PLACEHOLDER
+    R-BET-01: 25     # PLACEHOLDER
+    R-BET-02: 25     # PLACEHOLDER
+    R-BET-03: 10     # PLACEHOLDER
+    R-BET-04: 10     # PLACEHOLDER
+  rule_thresholds:
+    R-MA-01: 0       # PLACEHOLDER
+    R-MA-02: 0       # PLACEHOLDER
+    R-MA-03: 0       # PLACEHOLDER
+    R-MA-04: 0       # PLACEHOLDER
+    R-MA-05: 0       # PLACEHOLDER
+    R-MA-07: 3       # PLACEHOLDER
+    R-MA-08: 0       # PLACEHOLDER
+    R-PAY-03: 60     # PLACEHOLDER - minutes
+    R-PAY-04: 1.5    # PLACEHOLDER - withdrawal/deposit ratio
+    R-PAY-05: 2      # PLACEHOLDER - fast withdrawal count
+    R-PAY-06: 2      # PLACEHOLDER - manual reconciliation count
+    R-PAY-07: 0.25   # PLACEHOLDER - manual reconciliation ratio
+    R-PAY-08: 0      # PLACEHOLDER
+    R-BET-01: 0.70   # PLACEHOLDER
+    R-BET-02: 0.20   # PLACEHOLDER - lower timing CV is more regular.
+    R-BET-03: 1.0    # PLACEHOLDER
+    R-BET-04: 0.50   # PLACEHOLDER
+  rules:
+    - rule_id: R-MA-01
+      feature: ma_nin_shared_account_count
+      op: gt
+      threshold_key: R-MA-01
+      reason_template: "shares NIN hash with {value_int} other account(s): {other_player_keys} (+{points:g})"
+    - rule_id: R-MA-02
+      feature: ma_email_shared_account_count
+      op: gt
+      threshold_key: R-MA-02
+      reason_template: "shares email hash with {value_int} other account(s): {other_player_keys} (+{points:g})"
+    - rule_id: R-MA-03
+      feature: ma_device_shared_account_count
+      op: gt
+      threshold_key: R-MA-03
+      reason_template: "shares valid device fingerprint with {value_int} other account(s): {other_player_keys} (+{points:g})"
+    - rule_id: R-MA-04
+      feature: ma_withdrawal_recipient_shared_count
+      op: gt
+      threshold_key: R-MA-04
+      reason_template: "shares withdrawal recipient(s) {shared_keys} with {value_int} other account(s): {other_player_keys} (+{points:g})"
+    - rule_id: R-MA-05
+      feature: ma_identity_phone_collision_count
+      op: gt
+      threshold_key: R-MA-05
+      reason_template: "normalized phone collides with {value_int} other player record(s): {other_player_keys} (+{points:g})"
+    - rule_id: R-MA-06
+      feature: ma_referred_by_linked_account
+      op: is_true
+      reason_template: "referred by linked account {referrer_player_key} with corroborating linkage {shared_key_types} (+{points:g})"
+    - rule_id: R-MA-07
+      feature: ma_referral_fanout_count
+      op: gte
+      threshold_key: R-MA-07
+      reason_template: "referred {value_int} account(s): {referred_player_keys} (+{points:g})"
+    - rule_id: R-MA-08
+      feature: ma_cocreated_linked_count
+      op: gt
+      threshold_key: R-MA-08
+      reason_template: "created close in time to {value_int} directly linked account(s): {other_player_keys} (+{points:g})"
+    - rule_id: R-PAY-01
+      feature: pay_deposit_then_exit_flag
+      op: is_true
+      reason_template: "deposit {deposit_id} -> withdrawal {withdrawal_id}: withdrew {pct_withdrawn:.1f}% of deposit, intervening stake {intervening_stake_sum:g} (+{points:g})"
+    - rule_id: R-PAY-02
+      feature: pay_third_party_withdrawal_flag
+      op: is_true
+      reason_template: "completed withdrawal to third-party recipient(s) {recipient_numbers} (+{points:g})"
+    - rule_id: R-PAY-03
+      feature: pay_min_minutes_deposit_to_withdrawal
+      op: lte
+      threshold_key: R-PAY-03
+      reason_template: "minimum deposit-to-withdrawal gap is {value:.1f} min via {deposit_id}->{withdrawal_id} (+{points:g})"
+    - rule_id: R-PAY-04
+      feature: pay_withdrawal_to_deposit_ratio
+      op: gte
+      threshold_key: R-PAY-04
+      reason_template: "withdrawal/deposit ratio is {value:.2f}; {reason_text} (+{points:g})"
+    - rule_id: R-PAY-05
+      feature: pay_fast_withdrawal_count
+      op: gte
+      threshold_key: R-PAY-05
+      reason_template: "{value_int} fast withdrawal(s) after deposits (+{points:g})"
+    - rule_id: R-PAY-06
+      feature: pay_manual_reconciliation_count
+      op: gte
+      threshold_key: R-PAY-06
+      reason_template: "{value_int} manual reconciliation deposit(s): {deposit_ids} (+{points:g})"
+    - rule_id: R-PAY-07
+      feature: pay_manual_reconciliation_ratio
+      op: gte
+      threshold_key: R-PAY-07
+      reason_template: "manual reconciliation ratio is {value:.2f}; deposit IDs {deposit_ids} (+{points:g})"
+    - rule_id: R-PAY-08
+      feature: pay_declined_withdrawal_count
+      op: gt
+      threshold_key: R-PAY-08
+      reason_template: "{value_int} declined withdrawal(s): {withdrawal_ids} (+{points:g})"
+    - rule_id: R-BET-01
+      feature: bet_win_rate_vs_volume
+      op: gte
+      threshold_key: R-BET-01
+      reason_template: "settled win rate {value:.2f} over {settled_bets} settled bet(s); wins {wins} (+{points:g})"
+    - rule_id: R-BET-02
+      feature: bet_timing_regularity
+      op: lte
+      threshold_key: R-BET-02
+      reason_template: "near-regular betting cadence: CV {value:.3f} across {ticket_count} ticket(s) (+{points:g})"
+    - rule_id: R-BET-03
+      feature: bet_stake_volatility
+      op: gte
+      threshold_key: R-BET-03
+      reason_template: "stake volatility CV {value:.2f}; stake range {min_stake:g}-{max_stake:g} (+{points:g})"
+    - rule_id: R-BET-04
+      feature: bet_bonus_funded_stake_share
+      op: gte
+      threshold_key: R-BET-04
+      reason_template: "bonus-funded stake share {value:.2f}; bonus tickets {bonus_staked_ticket_ids} (+{points:g})"

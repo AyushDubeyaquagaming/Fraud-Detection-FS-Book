@@ -342,7 +342,7 @@ Phase 2 relabeled bets to UGX. Each is flagged ⚠️.
 - **Scoring role:** scoring, primarily in combination (it gates the flagship and
   reshapes the ratio's meaning).
 
-#### `pay_min_minutes_deposit_to_withdrawal` — strong
+#### `pay_min_minutes_deposit_to_withdrawal` — strong/supporting
 - **Definition:** smallest gap between any completed deposit's `finalized_at`
   and a subsequent completed withdrawal's `requested_at`.
 - **Value:** float minutes / null. **Evidence:** the `(deposit_id,
@@ -353,7 +353,9 @@ Phase 2 relabeled bets to UGX. Each is flagged ⚠️.
 - **Coverage / null:** ≥1 completed deposit and ≥1 subsequent completed
   withdrawal; else `null` + `no_completed_deposits`,
   `no_completed_withdrawals`, or `no_subsequent_completed_withdrawal`.
-- **Scoring role:** scoring, in combination.
+- **Scoring role:** supporting. Raw fast withdrawal is a corroborator, not a
+  standalone flag-raiser; Phase 4 suppresses it unless a payment scoring rule
+  also fires.
 
 #### `pay_third_party_withdrawal_flag` / `pay_third_party_withdrawal_count` — strong — *shared with `ma_`*
 - **Definition:** did the player ever complete a withdrawal to

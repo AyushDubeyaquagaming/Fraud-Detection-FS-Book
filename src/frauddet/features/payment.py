@@ -23,7 +23,7 @@ from .withdrawals import WithdrawalContext, build_withdrawal_context
 FEATURE_SPECS: dict[str, FeatureSpec] = {
     "pay_deposit_then_exit_flag": FeatureSpec("strong", "scoring", "bool"),
     "pay_intervening_turnover_ratio": FeatureSpec("strong", "scoring", "float"),
-    "pay_min_minutes_deposit_to_withdrawal": FeatureSpec("strong", "scoring", "float"),
+    "pay_min_minutes_deposit_to_withdrawal": FeatureSpec("strong", "supporting", "float"),
     "pay_third_party_withdrawal_flag": FeatureSpec("strong", "scoring", "bool"),
     "pay_third_party_withdrawal_count": FeatureSpec("strong", "scoring", "count"),
     "pay_withdrawal_to_deposit_ratio": FeatureSpec("moderate", "supporting", "float"),
@@ -400,14 +400,14 @@ def _minimum_gap_result(
     """Shortest completed-deposit to completed-withdrawal gap."""
     reason = _pair_null_reason(deposits, withdrawals, pairs)
     if reason:
-        return FeatureResult(None, [], reason, "strong", "scoring")
+        return FeatureResult(None, [], reason, "strong", "supporting")
     pair = min(pairs, key=lambda item: item.gap_minutes)
     return FeatureResult(
         pair.gap_minutes,
         [{**_pair_evidence(pair), "gap_minutes": pair.gap_minutes}],
         None,
         "strong",
-        "scoring",
+        "supporting",
     )
 
 
