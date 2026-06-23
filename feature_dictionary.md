@@ -15,6 +15,25 @@ Never live Mongo.
   or a JSON sidecar keyed by `player_key` + `feature_name`) — the
   reviewer-facing transaction-level evidence behind each feature.
 
+**Built feature count and names (code is source of truth):** 33 total features:
+9 `ma_`, 14 `pay_`, and 10 `bet_`.
+
+- `ma_`: `ma_nin_shared_account_count`, `ma_email_shared_account_count`,
+  `ma_device_shared_account_count`, `ma_withdrawal_recipient_shared_count`,
+  `ma_identity_phone_collision_count`, `ma_referred_by_linked_account`,
+  `ma_referral_fanout_count`, `ma_cocreated_linked_count`, `ma_device_count`.
+- `pay_`: `pay_deposit_then_exit_flag`, `pay_intervening_turnover_ratio`,
+  `pay_min_minutes_deposit_to_withdrawal`, `pay_third_party_withdrawal_flag`,
+  `pay_third_party_withdrawal_count`, `pay_withdrawal_to_deposit_ratio`,
+  `pay_fast_withdrawal_count`, `pay_manual_reconciliation_count`,
+  `pay_manual_reconciliation_ratio`, `pay_declined_withdrawal_count`,
+  `pay_failed_withdrawal_count`, `pay_net_money_flow`,
+  `pay_distinct_payment_methods`, `pay_distinct_payment_accounts`.
+- `bet_`: `bet_win_rate_vs_volume`, `bet_timing_regularity`,
+  `bet_stake_volatility`, `bet_bonus_funded_stake_share`,
+  `bet_game_type_concentration`, `bet_avg_odds`, `bet_odds_profile`,
+  `bet_count`, `bet_active_days`, `bet_void_rate`.
+
 Only players with a non-null `player_key` enter the feature table. Unjoined
 rows (`pre_registration` / `test_pattern` / `unknown` / `staff`) are excluded,
 per the Phase 2 identity policy.
@@ -52,7 +71,8 @@ per the Phase 2 identity policy.
 5. **Game-context-aware betting.** Betting features are computed per
    `game_type`. Today that is ~100% Sports-book; the structure exists so casino
    betting slots into the same logic when per-round logging arrives, without
-   reworking sportsbook.
+   reworking sportsbook. The wide-table scalar is the most suspicious per-game
+   value, while the full per-game breakdown stays in evidence.
 
 6. **Built ≠ active on dev.** Many strong features (shared-NIN, win-rate,
    deposit-then-exit for casino-touching players) will be null/zero on dev
@@ -74,12 +94,23 @@ evidence in the companion store):
 | `feature_strength` | enum | `strong` / `moderate` / `weak` / `context_only` |
 | `feature_scoring_role` | enum | `scoring` / `supporting` / `context_only` |
 
-**`feature_null_reason` vocabulary** (extensible; defined per feature):
-`no_completed_deposits`, `no_completed_withdrawals`,
-`no_sportsbook_bets_observed`, `casino_activity_not_observable`,
-`insufficient_deposit_denominator`, `insufficient_settled_bets`,
-`insufficient_bets_for_timing`, `insufficient_bets_for_volatility`,
-`no_withdrawals`, `no_bets`.
+**`feature_null_reason` vocabulary** (complete set emitted by the built
+`ma_`, `pay_`, and `bet_` feature modules):
+
+| null reason | meaning |
+|---|---|
+| `no_completed_deposits` | The feature needs credited/completed deposits, and none exist for the player. |
+| `no_completed_withdrawals` | The feature needs completed withdrawals, and none exist for the player. |
+| `no_subsequent_completed_withdrawal` | Deposits and withdrawals exist, but no completed withdrawal occurs after a completed deposit. |
+| `no_triggering_deposit_withdrawal_pair` | Deposit-withdrawal timing is measurable, but no pair meets the trigger rule needed for the turnover ratio. |
+| `casino_activity_not_observable` | The player has no sportsbook history and v1 cannot observe player-level casino play. |
+| `insufficient_deposit_denominator` | Completed deposit volume is below the placeholder denominator floor for payment ratios. |
+| `no_valid_fingerprint_logins` | The player has no usable 64-hex PLAYER device fingerprint login. |
+| `no_withdrawals` | The feature needs any withdrawal row, and none exist for the player. |
+| `no_bets` | The feature needs betting history, and none exists for the player. |
+| `insufficient_settled_bets` | Settled bet count is below the win-rate volume gate. |
+| `insufficient_bets_for_timing` | Bet count is below the timing-regularity volume gate. |
+| `insufficient_bets_for_volatility` | Bet count is below the stake-volatility volume gate. |
 
 `scoring` = drives flags directly. `supporting` = contributes only in
 combination with a scoring feature. `context_only` = surfaced in the case file
@@ -99,6 +130,15 @@ people into one fake ring).
 Evidence convention for `ma_`: the list of **other `player_key`s** sharing the
 attribute, plus a reference to the shared key (hashed identifiers shown as hash,
 never raw).
+
+**Device cardinality cap:** `thresholds.ma_device_max_cardinality` is a
+PLACEHOLDER value (`10` in the current config). Fingerprints shared by more
+than N players are treated as shared/public/office devices, not evidence of one
+operator. Those over-cardinality fingerprints are excluded from
+`ma_device_shared_account_count` links/evidence and from referral/co-creation
+corroboration, but remain visible to context-only `ma_device_count`. The
+post-cap dev residual is still artifact-dominated, and the cap must be
+calibrated on production data.
 
 ### Tier 1 — Strong (built now; some dormant on dev)
 
@@ -140,7 +180,9 @@ never raw).
 - **Coverage:** players with ≥1 valid-fingerprint login (~most; ~60% have a
   single stable fingerprint). **Null:** `null` + `no_valid_fingerprint_logins`
   if the player never logged in with a valid fingerprint.
-- **Dev note:** sharing counts are office artifacts → calibration is production.
+- **Dev note:** sharing counts are office artifacts; the cap removes the largest
+  public-device artifacts, but the remaining sub-cap sharing is still not
+  production signal. Calibration is production work.
 - **Scoring role:** scoring.
 
 #### `ma_withdrawal_recipient_shared_count` — strong — *shared with `pay_`*
@@ -263,15 +305,20 @@ Phase 2 relabeled bets to UGX. Each is flagged ⚠️.
   it; someone who played won't satisfy "stake < Z%". Residual: deposit → decide
   not to play → withdraw (innocent, rare, worth a glance).
 - **Coverage:** ≥1 completed deposit AND ≥1 subsequent completed withdrawal.
+- **Pairing limitation:** v1 pairs each completed withdrawal to the one nearest
+  preceding completed deposit. This is a known production false-negative vector:
+  a player can split funds across several small deposits and withdraw the total,
+  causing the denominator to be computed against one deposit. Candidate
+  production hardening: cumulative-undrawn-deposit pairing.
 - **Null (three-way turnover logic — critical):**
-  - sportsbook bets exist in window → evaluate the betting condition normally.
-  - **no bets of any kind AND no casino footprint observable** → conceptually
-    "zero play confirmed" → flag may fire. **In v1 this branch is UNREACHABLE**
-    (casino telemetry doesn't tie to players), so it collapses to null. Code is
-    structured so casino logging later unlocks it.
-  - no sportsbook bets + casino activity exists but unvaluable → `null` +
-    `casino_activity_not_observable`.
-  - **Net v1 behavior:** casino-touching players → `null` +
+  - player has sportsbook history → evaluate the betting condition normally.
+    A sportsbook-active player can still have `0.0` intervening turnover if no
+    bets fall between the matched deposit and withdrawal.
+  - **no bets of any kind AND confirmed no casino play** → conceptually "zero
+    play confirmed" → flag may fire. **In v1 this branch is UNREACHABLE**
+    because casino telemetry does not tie to players. The branch is built so
+    player-level casino logging can switch it on later.
+  - **Net v1 behavior:** every player without sportsbook history → `null` +
     `casino_activity_not_observable`, NOT `False`. We never emit a confident
     `False` when we couldn't see the play.
 - **Dev note:** largely dormant for casino-touching players until casino logging
@@ -290,7 +337,8 @@ Phase 2 relabeled bets to UGX. Each is flagged ⚠️.
 - **Coverage / null:** the three-way logic above (same as the flagship). v1: no
   sportsbook bets → `null` + `casino_activity_not_observable`. A genuine
   `0.0` (sportsbook-active but staked nothing in the window) is a real,
-  scoreable value.
+  scoreable value. If there is no qualifying fast-exit pair, this feature is
+  `null` + `no_triggering_deposit_withdrawal_pair`.
 - **Scoring role:** scoring, primarily in combination (it gates the flagship and
   reshapes the ratio's meaning).
 
@@ -303,7 +351,8 @@ Phase 2 relabeled bets to UGX. Each is flagged ⚠️.
 - **FP traps:** fast legitimate winning cash-out → pairs with turnover; fast
   alone is suspicious, fast + no-play is damning. Never the sole flag.
 - **Coverage / null:** ≥1 completed deposit and ≥1 subsequent completed
-  withdrawal; else `null` + `no_completed_deposits` / `no_completed_withdrawals`.
+  withdrawal; else `null` + `no_completed_deposits`,
+  `no_completed_withdrawals`, or `no_subsequent_completed_withdrawal`.
 - **Scoring role:** scoring, in combination.
 
 #### `pay_third_party_withdrawal_flag` / `pay_third_party_withdrawal_count` — strong — *shared with `ma_`*
@@ -331,9 +380,9 @@ Phase 2 relabeled bets to UGX. Each is flagged ⚠️.
 - **Hypothesis:** withdrawing materially more than deposited can indicate a
   cash-out endpoint.
 - **FP traps:** **the lucky legitimate winner — the system's single biggest
-  FP.** Therefore `context_only` UNLESS combined with low intervening turnover,
-  fast exit, third-party recipient, or manual-recon exposure. The scorer MUST
-  require a co-signal.
+  FP.** Therefore this is `supporting`: it is available to scoring only when
+  combined with low intervening turnover, fast exit, third-party recipient, or
+  manual-recon exposure. The scorer MUST require a co-signal.
 - **Coverage / null:** needs ≥1 completed deposit as denominator. **Denominator
   gate:** if total completed deposits < placeholder floor → `null` +
   `insufficient_deposit_denominator` (prevents deposit-2k-withdraw-50k and
@@ -347,7 +396,9 @@ Phase 2 relabeled bets to UGX. Each is flagged ⚠️.
 - **Hypothesis:** repeated fast cycling, not a one-off.
 - **FP traps:** as min-minutes; gate on count ≥ N.
 - **Coverage / null:** needs both sides; `null` + reason otherwise.
-- **Scoring role:** supporting.
+- **Scoring role:** supporting. This timing signal is intentionally measurable
+  for non-sportsbook/casino-only players, but must never stand alone as evidence
+  against them in Phase 4.
 
 #### `pay_manual_reconciliation_count` / `pay_manual_reconciliation_ratio` — moderate, platform-specific
 - **Definition:** count and share of the player's money-in deposits with
@@ -358,7 +409,8 @@ Phase 2 relabeled bets to UGX. Each is flagged ⚠️.
   collusion — a signal available *because of how this platform works*.
 - **FP traps:** genuine gateway failures hit honest players; only an elevated
   *share with volume* is meaningful. Small counts are noise.
-- **Coverage / null:** any player with deposits; most `0` (real zero).
+- **Coverage / null:** any player with credited deposits; most `0` (real zero).
+  No credited deposits → `null` + `no_completed_deposits`.
 - **Scoring role:** supporting.
 
 #### `pay_declined_withdrawal_count` — moderate
@@ -401,6 +453,13 @@ most to lie dormant until production. **Sportsbook-only** by data availability;
 all features computed per `game_type` so casino slots in later.
 Reads `bets.parquet`. Evidence = `ticket_id`s.
 
+**Per-game scalar reduction (built behavior):** betting features are computed
+per `game_type`, but the wide table stores one scalar per feature. The scalar is
+the most suspicious per-game value: highest settled win rate, lowest timing CV,
+highest stake volatility, or dominant game-type stake share. The full per-game
+breakdown remains in evidence. Phase 4 thresholds this worst-game scalar, NOT a
+player-wide average.
+
 ### Tier 1 — Strong-when-measurable (volume-gated; dormant on dev)
 
 #### `bet_win_rate_vs_volume` — strong (prod), **dormant (dev)**
@@ -415,7 +474,8 @@ Reads `bets.parquet`. Evidence = `ticket_id`s.
   Never standalone; "high rate + high volume + maybe fast cash-out." The volume
   gate is the primary defense.
 - **Coverage / null:** `null` + `insufficient_settled_bets` below floor (most
-  dev players). Low rate is a real measurement.
+  dev players with bets); `null` + `no_bets` when the player has no betting
+  history. Low rate is a real measurement.
 - **Scoring role:** scoring, in combination, production-calibrated.
 
 #### `bet_timing_regularity` — strong-when-measurable — the bot signal
@@ -428,7 +488,8 @@ Reads `bets.parquet`. Evidence = `ticket_id`s.
   automation.
 - **FP traps:** a disciplined human; live-event betting at regular breaks. A
   hint, not proof.
-- **Coverage / null:** `null` + `insufficient_bets_for_timing` below floor.
+- **Coverage / null:** `null` + `insufficient_bets_for_timing` below floor;
+  `null` + `no_bets` when the player has no betting history.
 - **Scoring role:** scoring, in combination.
 
 ### Tier 2 — Moderate supporting
@@ -440,7 +501,8 @@ Reads `bets.parquet`. Evidence = `ticket_id`s.
 - **Hypothesis:** wildly erratic stakes → bonus-hunting / limit-testing /
   chasing; very uniform stakes → scripted betting.
 - **FP traps:** normal bankroll variation; noisy both directions.
-- **Coverage / null:** `null` + `insufficient_bets_for_volatility` below floor.
+- **Coverage / null:** `null` + `insufficient_bets_for_volatility` below floor;
+  `null` + `no_bets` when the player has no betting history.
 - **Scoring role:** supporting.
 
 #### `bet_bonus_funded_stake_share` — moderate — *cross-links to `pay_`*
@@ -452,6 +514,7 @@ Reads `bets.parquet`. Evidence = `ticket_id`s.
   (bonus-funded play + deposit-then-exit).
 - **FP traps:** legitimate welcome-bonus use. Meaningful mainly in combination.
 - **Coverage / null:** any player with bets; `0` is real (no bonus play).
+  No bets → `null` + `no_bets`.
 - **Scoring role:** supporting.
 
 #### `bet_game_type_concentration` — moderate, structural — **the casino hook**
@@ -464,21 +527,22 @@ Reads `bets.parquet`. Evidence = `ticket_id`s.
   logic** (whether turnover is measurable). *Later*, concentration in a specific
   exploitable game becomes a real exploitation signal.
 - **FP traps:** none today (descriptive).
-- **Coverage / null:** any player with bets.
+- **Coverage / null:** any player with bets; no bets → `null` + `no_bets`.
 - **Scoring role:** `context_only` now; **promotes to supporting when casino
   data exists.** This single feature is what makes casino integration a switch,
   not a rebuild.
 
 ### Tier 3 — Weak / context-only
 
-- **`bet_avg_odds` / `bet_odds_profile`** — weak — mean/spread of `total_odds`.
+- **`bet_avg_odds` / `bet_odds_profile`** — weak/context_only — mean/spread of `total_odds`.
   Longshot-only or always-min-odds patterns can hint at strategies/arbitrage;
-  noisy. Context.
-- **`bet_count` / `bet_active_days`** — weak/context — raw volume and span; not
+  noisy. `null` + `no_bets` when no odds are measurable. Context.
+- **`bet_count` / `bet_active_days`** — weak/context_only — raw volume and span; not
   signals themselves, they are the denominators the gates use, surfaced for
-  context.
-- **`bet_void_rate`** — weak — share of VOID bets. Usually legitimate (cancelled
-  events). Context.
+  context. Zero is a real measured value for no-bet players.
+- **`bet_void_rate`** — weak/context_only — share of VOID bets. Usually legitimate
+  (cancelled events). `null` + `no_bets` when the player has no betting history.
+  Context.
 
 ### Tier 4 — Deferred until casino logging
 
@@ -489,9 +553,11 @@ Reads `bets.parquet`. Evidence = `ticket_id`s.
 
 ---
 
-## 6. Lifecycle / gating features (shared, computed once)
+## 6. Lifecycle / gating features (future Phase 4 candidates; not built in the Phase 3 table)
 
-Not a sub-score; these support FP-control and combination logic across groups.
+Not a sub-score and not part of the 33 built features. These are candidate
+Phase 4 helper/context fields that may support FP-control and combination logic
+later.
 
 - `account_age_days` — `now(snapshot_date) − players.created_at`. Used to gate
   new-player instability (a 90%-win-rate over 3 bets on a 1-day-old account is
@@ -524,13 +590,15 @@ overall_risk           = multi_accounting_score + payment_fraud_score
 - `null` features contribute **0** and are shown to the reviewer as
   "not measurable (reason)", never as "clean".
 - Every point/weight/band cut is a `# PLACEHOLDER` in `config.yaml` →
-  `thresholds:` (currently empty). **Nothing is tuned on dev.**
+  `thresholds:`. Some placeholder thresholds already drive Phase 3 feature
+  gates and windows; none are calibrated on dev.
 
 ---
 
 ## 8. config.yaml placeholder inventory (all PLACEHOLDER)
 
-Add under `thresholds:` (or a `features:` block). None used until Phase 4.
+Configured under `thresholds:`. Values are placeholders; feature gates/windows
+use them now, and scoring weights/bands come later in Phase 4.
 
 **Payment:**
 `pay_fast_window_minutes` (Y), `pay_pct_withdrawn_threshold` (X),
@@ -544,8 +612,9 @@ Add under `thresholds:` (or a `features:` block). None used until Phase 4.
 `bet_win_rate_threshold`.
 
 **Multi-accounting:**
-`ma_cocreation_window_minutes`, `ma_referral_fanout_threshold`, and (deferred,
-for prod) `ma_ip_infra_exclusion_list`, `ma_ip_max_cardinality_cap`.
+`ma_cocreation_window_minutes`, `ma_referral_fanout_threshold`,
+`ma_device_max_cardinality`, and (deferred, for prod)
+`ma_ip_infra_exclusion_list`, `ma_ip_max_cardinality_cap`.
 
 **Gating:** `min_account_age_days_for_betting_flags`,
 plus per-feature minimum-activity gates referenced above.
