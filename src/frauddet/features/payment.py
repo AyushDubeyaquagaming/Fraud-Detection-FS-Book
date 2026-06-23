@@ -188,6 +188,9 @@ def _player_results(
         "pay_withdrawal_to_deposit_ratio": _withdrawal_deposit_ratio(
             deposits, completed_withdrawals, thresholds.min_deposit_denominator
         ),
+        # Timing-only signal: intentionally measurable for non-sportsbook
+        # players. Phase 4 must keep it supporting-only and never use it as
+        # standalone evidence against casino-only players.
         "pay_fast_withdrawal_count": _fast_withdrawal_result(
             deposits, completed_withdrawals, fast_pairs
         ),
@@ -302,6 +305,11 @@ def _pair_withdrawals_to_preceding_deposits(
     deposits: list[dict[str, Any]],
     withdrawals: list[dict[str, Any]],
 ) -> list[DepositWithdrawalPair]:
+    # Known production false-negative vector: v1 pairs each withdrawal to one
+    # nearest preceding deposit. Splitting funds across several small deposits
+    # before withdrawing the total can understate the denominator and evade the
+    # flagship. Production calibration should evaluate cumulative-undrawn
+    # deposit pairing or a comparable multi-deposit matching rule.
     timed_deposits = [
         (pd.to_datetime(row.get("finalized_at"), utc=True, errors="coerce"), row)
         for row in deposits
