@@ -1,16 +1,20 @@
 """Tests for Phase 4 rule scoring and false-positive controls."""
+import copy
 import json
+import logging
 import sys
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from frauddet.config import load_config
 from frauddet.features.betting import FEATURE_SPECS as BET_SPECS
 from frauddet.features.multi_accounting import FEATURE_SPECS as MA_SPECS
 from frauddet.features.payment import FEATURE_SPECS as PAY_SPECS
-from frauddet.scoring import score_players
+from frauddet.scoring import build_rules, score_players
 
 
 ALL_SPECS = {**MA_SPECS, **PAY_SPECS, **BET_SPECS}
@@ -230,6 +234,74 @@ def test_band_boundaries_and_iforest_weight_zero():
     assert flags.loc["low", "overall_risk"] == 0
 
 
+def test_each_scoring_feature_group_has_a_scoring_rule_trigger():
+    rules = build_rules(load_config()["scoring"])
+    scoring_feature_groups = {
+        _group_for(feature_name)
+        for feature_name, spec in ALL_SPECS.items()
+        if spec.scoring_role == "scoring"
+    }
+    scoring_rule_groups = {
+        rule.group
+        for rule in rules
+        if ALL_SPECS[rule.feature].scoring_role == "scoring"
+    }
+    rule_features = {rule.feature for rule in rules}
+
+    assert scoring_feature_groups <= scoring_rule_groups
+    assert "pay_intervening_turnover_ratio" not in rule_features
+    assert "pay_third_party_withdrawal_count" not in rule_features
+
+
+def test_iforest_fit_failure_logs_before_zero_weight_fallback(caplog):
+    features, evidence = _feature_frames(_player("p1"), _player("p2"))
+    cfg = copy.deepcopy(load_config())
+    cfg["scoring"]["iforest"]["n_estimators"] = "invalid"
+    cfg["scoring"]["iforest"]["weight"] = 0
+
+    with caplog.at_level(logging.ERROR, logger="frauddet.scoring"):
+        flags = score_players(
+            player_features=features,
+            feature_evidence=evidence,
+            cfg=cfg,
+            write_outputs=False,
+        ).flags
+
+    assert flags["iforest_score_untrusted"].tolist() == [0.0, 0.0]
+    assert any("IsolationForest plumbing fit failed" in row.message for row in caplog.records)
+
+
+def test_iforest_fit_failure_raises_when_weight_is_nonzero():
+    features, evidence = _feature_frames(_player("p1"), _player("p2"))
+    cfg = copy.deepcopy(load_config())
+    cfg["scoring"]["iforest"]["n_estimators"] = "invalid"
+    cfg["scoring"]["iforest"]["weight"] = 1
+
+    with pytest.raises(RuntimeError, match="IsolationForest fit failed"):
+        score_players(
+            player_features=features,
+            feature_evidence=evidence,
+            cfg=cfg,
+            write_outputs=False,
+        )
+
+
+def test_score_players_separates_feature_input_and_flag_output_dirs(tmp_path):
+    features, evidence = _feature_frames(_player("p1"))
+    input_dir = tmp_path / "features"
+    output_dir = tmp_path / "flags"
+    input_dir.mkdir()
+    features.to_parquet(input_dir / "player_features.parquet", index=False)
+    evidence.to_parquet(input_dir / "player_features_evidence.parquet", index=False)
+
+    result = score_players(input_dir=input_dir, output_dir=output_dir)
+
+    assert len(result.flags) == 1
+    assert (output_dir / "flags.parquet").exists()
+    assert (output_dir / "flags_report.md").exists()
+    assert not (input_dir / "flags.parquet").exists()
+
+
 def test_phase4_synthetic_scenario_suite():
     """Permanent logic suite from scoring_design.md; not a power test."""
     scenarios = [
@@ -359,3 +431,13 @@ def test_phase4_synthetic_scenario_suite():
             assert flags.loc[player_key, "overall_risk"] == 0
     unmeasured = json.loads(flags.loc["s8_casino_only", "unmeasured_features"])
     assert any(item["null_reason"] == "casino_activity_not_observable" for item in unmeasured)
+
+
+def _group_for(feature_name):
+    if feature_name.startswith("ma_"):
+        return "ma"
+    if feature_name.startswith("pay_"):
+        return "pay"
+    if feature_name.startswith("bet_"):
+        return "bet"
+    raise AssertionError(f"unknown feature group: {feature_name}")

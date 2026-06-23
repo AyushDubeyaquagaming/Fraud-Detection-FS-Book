@@ -212,10 +212,14 @@ scoring:
       op: gt
       threshold_key: R-MA-08
       reason_template: "created close in time to {value_int} directly linked account(s): {other_player_keys} (+{points:g})"
+    # R-PAY-01 also covers pay_intervening_turnover_ratio; do not add a
+    # separate turnover-ratio rule because both come from the same trigger pair.
     - rule_id: R-PAY-01
       feature: pay_deposit_then_exit_flag
       op: is_true
       reason_template: "deposit {deposit_id} -> withdrawal {withdrawal_id}: withdrew {pct_withdrawn:.1f}% of deposit, intervening stake {intervening_stake_sum:g} (+{points:g})"
+    # R-PAY-02 also covers pay_third_party_withdrawal_count; do not add a
+    # separate count rule because flag/count are the same third-party signal.
     - rule_id: R-PAY-02
       feature: pay_third_party_withdrawal_flag
       op: is_true

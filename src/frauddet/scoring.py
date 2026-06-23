@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,8 @@ import pandas as pd
 
 from . import config
 
+
+LOGGER = logging.getLogger(__name__)
 
 GROUP_SCORE_COLUMNS = {
     "ma": "multi_accounting_score",
@@ -80,6 +83,7 @@ def score_players(
     *,
     player_features: pd.DataFrame | None = None,
     feature_evidence: pd.DataFrame | None = None,
+    input_dir: Path | None = None,
     output_dir: Path | None = None,
     write_outputs: bool = True,
     cfg: dict[str, Any] | None = None,
@@ -93,7 +97,7 @@ def score_players(
     cfg = cfg or config.load_config()
     scoring_cfg = cfg["scoring"]
     if player_features is None or feature_evidence is None:
-        loaded_features, loaded_evidence = load_feature_outputs(output_dir)
+        loaded_features, loaded_evidence = load_feature_outputs(input_dir)
         player_features = loaded_features if player_features is None else player_features
         feature_evidence = loaded_evidence if feature_evidence is None else feature_evidence
 
@@ -132,6 +136,7 @@ def write_flags_report(
         "# Phase 4 Flags Report",
         "",
         "Thresholds, weights, and bands are PLACEHOLDER. Dev flags are a plumbing check only.",
+        _dev_artifact_warning(flags),
         "",
     ]
     for row in ranked.itertuples(index=False):
@@ -174,6 +179,9 @@ def _score_frame(
 ) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     rules_by_group: dict[str, list[Rule]] = {"ma": [], "pay": [], "bet": []}
+    # A few scoring-role features are deliberately covered by a sibling rule to
+    # avoid double-counting one signal. Example: R-PAY-01 owns both the exit flag
+    # and its paired turnover ratio; R-PAY-02 owns the third-party flag/count.
     for rule in rules:
         rules_by_group.setdefault(rule.group, []).append(rule)
 
@@ -346,6 +354,10 @@ def _iforest_scores(features: pd.DataFrame, iforest_cfg: dict[str, Any]) -> list
     ].astype("float64")
     if numeric.empty or len(numeric) < 2:
         return [0.0] * len(features)
+    # V1 leaves this blanket median fill in place only because the IF weight is
+    # zero. Before this path is trusted, structural nulls such as casino
+    # observability need deliberate handling, e.g. missingness indicators or a
+    # NaN-aware model, not "pretend typical" median imputation.
     numeric = numeric.fillna(numeric.median(numeric_only=True)).fillna(0.0)
     try:
         from sklearn.ensemble import IsolationForest
@@ -355,10 +367,35 @@ def _iforest_scores(features: pd.DataFrame, iforest_cfg: dict[str, Any]) -> list
             random_state=int(iforest_cfg.get("random_state", 42)),
         )
         return model.fit(numeric).score_samples(numeric).tolist()
-    except Exception:
-        # Scoring must remain deterministic even in a minimal environment. The
-        # column still proves plumbing, and its configured weight is zero.
+    except Exception as exc:
+        LOGGER.exception(
+            "IsolationForest plumbing fit failed; returning zero scores while "
+            "configured weight is zero."
+        )
+        # Production/nonzero IF weight must treat fit failure as an error, not a
+        # silent zero-score fallback.
+        if float(iforest_cfg.get("weight", 0)) != 0:
+            raise RuntimeError("IsolationForest fit failed with nonzero weight.") from exc
         return [0.0] * len(features)
+
+
+def _dev_artifact_warning(flags: pd.DataFrame) -> str:
+    """Specific caveat for the frozen dev snapshot's known device artifact."""
+    fired = flags["fired_rules"].map(json.loads).explode().dropna()
+    rule_counts: dict[str, int] = {}
+    for item in fired:
+        rule_counts[item["rule_id"]] = rule_counts.get(item["rule_id"], 0) + 1
+    device_count = rule_counts.get("R-MA-03", 0)
+    nonzero_count = int((flags["overall_risk"] > 0).sum())
+    medium_count = int((flags["band"] == "medium").sum())
+    if device_count == 0:
+        return "No R-MA-03 device-sharing rules fired in this run."
+    return (
+        "Frozen dev snapshot caveat: "
+        f"{nonzero_count} nonzero-risk rows and {medium_count} medium-band rows are "
+        f"dominated by known post-cap office-device artifacts flowing through R-MA-03 "
+        f"({device_count} fires), not confirmed suspicious accounts."
+    )
 
 
 def _unmeasured_features(feature_row: dict[str, Any]) -> list[dict[str, str]]:
