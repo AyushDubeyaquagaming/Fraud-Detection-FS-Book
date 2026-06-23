@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 
 from ..snapshot import load_snapshot
+from .betting import build_betting_features
 from .multi_accounting import build_multi_accounting_features
 from .output import FeatureBuildResult, combine_feature_build_results
 from .payment import build_payment_features
@@ -21,7 +22,7 @@ def build_phase3_features(
     output_dir: Path | None = None,
     write_outputs: bool = True,
 ) -> FeatureBuildResult:
-    """Build reviewed ma_ and pay_ groups from one frozen-snapshot load."""
+    """Build reviewed ma_, pay_, and bet_ groups from one frozen-snapshot load."""
     players = load_snapshot("players") if players is None else players.copy()
     money = load_snapshot("money") if money is None else money.copy()
     bets = load_snapshot("bets") if bets is None else bets.copy()
@@ -41,9 +42,15 @@ def build_phase3_features(
         withdrawal_context=withdrawals,
         write_outputs=False,
     )
+    bet_result = build_betting_features(
+        players=players,
+        bets=bets,
+        write_outputs=False,
+    )
     return combine_feature_build_results(
         ma_result,
         pay_result,
+        bet_result,
         output_dir=output_dir,
         write_outputs=write_outputs,
     )

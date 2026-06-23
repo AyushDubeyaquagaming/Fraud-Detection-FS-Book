@@ -110,6 +110,11 @@ thresholds:
   pay_fast_withdrawal_count_gate: 2    # PLACEHOLDER - Phase 4 scoring only.
   pay_manual_recon_ratio_threshold: 0.25  # PLACEHOLDER - Phase 4 scoring only.
   pay_manual_recon_min_count: 2        # PLACEHOLDER - Phase 4 scoring only.
+  bet_min_settled_bets_for_winrate: 30  # PLACEHOLDER - production volume gate.
+  bet_min_bets_for_timing: 20           # PLACEHOLDER - production volume gate.
+  bet_min_bets_for_volatility: 10       # PLACEHOLDER - production volume gate.
+  bet_timing_cv_threshold: 0.20         # PLACEHOLDER - Phase 4 scoring only.
+  bet_win_rate_threshold: 0.70          # PLACEHOLDER - Phase 4 scoring only.
 
 phase3:
   # Phase 3 feature work must read the frozen Phase 2 parquet contracts here,

@@ -24,8 +24,13 @@ devices. They remain visible to `ma_device_count` as context, but cannot create
 device-sharing links or corroborate referral and co-creation features.
 
 `build_phase3_features` loads each frozen input once and writes the reviewed
-`ma_` and `pay_` groups together. Both groups receive the same
+`ma_`, `pay_`, and `bet_` groups together. The money-facing groups receive the same
 `WithdrawalContext`, so completed-withdrawal filtering and recipient linkage
 have one implementation. Turnover-dependent payment features are null with
 `casino_activity_not_observable` when a player has no observable sportsbook
 activity; v1 cannot infer zero play from absent casino telemetry.
+
+Betting features are computed from `bets.parquet` only, with per-`game_type`
+evidence so casino can slot in later. Dev betting anomalies are expected to be
+mostly dormant because the statistical features are hard-gated on placeholder
+minimum-volume thresholds pending production calibration.

@@ -9,6 +9,7 @@ import pandas as pd
 
 from .. import config
 from ..snapshot import load_snapshot
+from .betting import sportsbook_active_players
 from .output import FeatureBuildResult, FeatureSpec, materialize_feature_group
 from .schema import FeatureResult, FeatureScoringRole, FeatureStrength
 from .withdrawals import WithdrawalContext, build_withdrawal_context
@@ -104,7 +105,7 @@ def build_payment_features(
     bets_by_player = _group_records(joined_bets)
     withdrawals_by_player = _group_records(withdrawals.withdrawals)
     completed_withdrawals_by_player = _group_records(withdrawals.completed)
-    sportsbook_active = frozenset(joined_bets["player_key"].unique())
+    sportsbook_active = sportsbook_active_players(joined_bets, population)
 
     def results_for(player_key: str) -> dict[str, FeatureResult]:
         return _player_results(
