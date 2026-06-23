@@ -1,4 +1,10 @@
-"""Reusable one-hop linkage indexes for relational player features."""
+"""Reusable one-hop linkage indexes for relational player features.
+
+Many fraud signals start as "players share the same thing": NIN hash, email
+hash, device fingerprint, or withdrawal recipient. This module builds that
+shared-key index once and keeps it strictly one-hop. It does not cluster players
+through transitive links.
+"""
 from __future__ import annotations
 
 from collections import defaultdict
@@ -19,7 +25,11 @@ class LinkageRow:
 
 @dataclass(frozen=True)
 class LinkageIndex:
-    """Direct shared-key index; never expands to connected components."""
+    """Direct shared-key index; never expands to connected components.
+
+    Example: if A shares one key with B and B shares another key with C, this
+    index links A-B and B-C only. It does not infer A-C.
+    """
 
     key_type: str
     key_to_players: dict[str, frozenset[str]]
@@ -63,7 +73,11 @@ class LinkageIndex:
         return sorted(own & other)
 
     def with_max_cardinality(self, max_players: int) -> "LinkageIndex":
-        """Return an index containing only keys observed on at most N players."""
+        """Return an index containing only keys observed on at most N players.
+
+        Used for dev/shared-device artifacts. A fingerprint seen across too
+        many players is treated as public equipment, not proof of one operator.
+        """
         if max_players < 1:
             raise ValueError("max_players must be positive.")
         allowed = {
@@ -128,7 +142,11 @@ def build_frame_linkage(
     key_column: str,
     record_id_column: str | None = None,
 ) -> LinkageIndex:
-    """Build a linkage index from a filtered player-keyed frame."""
+    """Build a linkage index from a filtered player-keyed frame.
+
+    Callers should filter the frame before calling this helper. For example,
+    device linkage passes only PLAYER logins with valid fingerprints.
+    """
     rows: list[LinkageRow] = []
     for row in frame.to_dict("records"):
         player_key = row.get("player_key")

@@ -1,4 +1,9 @@
-"""Payment-fraud features built from frozen money and sportsbook records."""
+"""Payment-fraud features built from frozen money and sportsbook records.
+
+The payment group focuses on money movement: deposits, withdrawals, timing, and
+recipient behavior. Some features also need sportsbook turnover to avoid saying
+"no play" when casino play is simply not observable in v1.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -35,6 +40,8 @@ FEATURE_SPECS: dict[str, FeatureSpec] = {
 
 @dataclass(frozen=True)
 class PaymentThresholds:
+    """Config-driven placeholder thresholds for payment features."""
+
     fast_window_minutes: float
     pct_withdrawn_threshold: float
     intervening_turnover_pct: float
@@ -52,6 +59,8 @@ class PaymentThresholds:
 
 @dataclass(frozen=True)
 class DepositWithdrawalPair:
+    """Nearest preceding deposit matched to one completed withdrawal."""
+
     deposit: dict[str, Any]
     withdrawal: dict[str, Any]
     gap_minutes: float
@@ -67,7 +76,11 @@ def build_payment_features(
     output_dir: Path | None = None,
     write_outputs: bool = True,
 ) -> FeatureBuildResult:
-    """Build exactly the Phase 3 v1 payment-fraud feature group."""
+    """Build exactly the Phase 3 v1 payment-fraud feature group.
+
+    The builder reads frozen parquet by default. Tests can pass DataFrames
+    directly, but feature work should not reach back into live Mongo.
+    """
     players = load_snapshot("players") if players is None else players.copy()
     money = load_snapshot("money") if money is None else money.copy()
     bets = load_snapshot("bets") if bets is None else bets.copy()
@@ -82,6 +95,8 @@ def build_payment_features(
         & money["player_key"].astype(str).isin(population)
     ].copy()
     joined_money["player_key"] = joined_money["player_key"].astype(str)
+    # Money ratios only make sense after the Phase 2 UGX contract is applied.
+    # If a raw/mislabeled currency sneaks in, fail before producing features.
     ledger_rows = joined_money[
         joined_money["is_money_in"].fillna(False).astype(bool)
         | joined_money["is_money_out"].fillna(False).astype(bool)
@@ -105,6 +120,8 @@ def build_payment_features(
     bets_by_player = _group_records(joined_bets)
     withdrawals_by_player = _group_records(withdrawals.withdrawals)
     completed_withdrawals_by_player = _group_records(withdrawals.completed)
+    # This same helper is used by bet_game_type_concentration, so the payment
+    # casino-null gate and betting context agree on who has sportsbook activity.
     sportsbook_active = sportsbook_active_players(joined_bets, population)
 
     def results_for(player_key: str) -> dict[str, FeatureResult]:
@@ -136,11 +153,14 @@ def _player_results(
     sportsbook_active: bool,
     thresholds: PaymentThresholds,
 ) -> dict[str, FeatureResult]:
+    """Compute all pay_ feature results for one player."""
     deposits = [row for row in money_rows if bool(row.get("is_money_in"))]
     pairs = _pair_withdrawals_to_preceding_deposits(deposits, completed_withdrawals)
     fast_pairs = [
         pair for pair in pairs if pair.gap_minutes <= thresholds.fast_window_minutes
     ]
+    # A trigger pair is a fast completed withdrawal that returns most of the
+    # matched deposit. Turnover is checked separately after observability.
     trigger_pairs = [
         pair
         for pair in fast_pairs
@@ -226,6 +246,12 @@ def _turnover_results(
     sportsbook_active: bool,
     thresholds: PaymentThresholds,
 ) -> dict[str, FeatureResult]:
+    """Compute the turnover-dependent flagship features.
+
+    The order matters: first decide whether sportsbook/casino turnover is
+    observable, then decide if a deposit-withdrawal pair exists, then measure
+    intervening stake for qualifying pairs.
+    """
     if not _turnover_observable(sportsbook_active):
         return _null_turnover_results("casino_activity_not_observable")
     null_reason = _pair_null_reason(deposits, withdrawals, pairs)
@@ -282,6 +308,7 @@ def _turnover_observable(
     *,
     casino_zero_play_confirmed: bool = False,
 ) -> bool:
+    """Return whether a player has observable play for turnover checks."""
     if sportsbook_active:
         return True
     # Future casino hook: player-level telemetry can make confirmed zero play
@@ -292,6 +319,7 @@ def _turnover_observable(
 
 
 def _null_turnover_results(reason: str) -> dict[str, FeatureResult]:
+    """Return the same null reason for both turnover-dependent features."""
     return {
         "pay_deposit_then_exit_flag": FeatureResult(
             None, [], reason, "strong", "scoring"
@@ -351,6 +379,7 @@ def _turnover_for_pair(
     pair: DepositWithdrawalPair,
     bets: list[dict[str, Any]],
 ) -> tuple[float, float, list[str]]:
+    """Stake between a matched deposit and withdrawal, divided by deposit size."""
     start = pd.to_datetime(pair.deposit.get("finalized_at"), utc=True, errors="coerce")
     end = pd.to_datetime(pair.withdrawal.get("requested_at"), utc=True, errors="coerce")
     intervening: list[dict[str, Any]] = []
@@ -368,6 +397,7 @@ def _minimum_gap_result(
     withdrawals: list[dict[str, Any]],
     pairs: list[DepositWithdrawalPair],
 ) -> FeatureResult:
+    """Shortest completed-deposit to completed-withdrawal gap."""
     reason = _pair_null_reason(deposits, withdrawals, pairs)
     if reason:
         return FeatureResult(None, [], reason, "strong", "scoring")
@@ -386,6 +416,11 @@ def _fast_withdrawal_result(
     withdrawals: list[dict[str, Any]],
     pairs: list[DepositWithdrawalPair],
 ) -> FeatureResult:
+    """Count withdrawals inside the fast-exit window.
+
+    This is a timing signal, not a turnover signal, so it remains measurable for
+    casino-only players. Phase 4 must keep it supporting-only.
+    """
     if not deposits:
         return FeatureResult(None, [], "no_completed_deposits", "moderate", "supporting")
     if not withdrawals:
@@ -401,6 +436,7 @@ def _completed_withdrawal_result(
     strength: FeatureStrength,
     scoring_role: FeatureScoringRole,
 ) -> FeatureResult:
+    """Shared helper for features that require completed withdrawals."""
     if not withdrawals:
         return FeatureResult(
             None, [], "no_completed_withdrawals", strength, scoring_role
@@ -413,6 +449,7 @@ def _withdrawal_deposit_ratio(
     withdrawals: list[dict[str, Any]],
     denominator_floor: float,
 ) -> FeatureResult:
+    """Completed money_out divided by completed money_in, with denominator gate."""
     if not deposits:
         return FeatureResult(
             None, [], "no_completed_deposits", "moderate", "supporting"
@@ -451,6 +488,7 @@ def _manual_reconciliation_result(
     *,
     ratio: bool,
 ) -> FeatureResult:
+    """Count or ratio of credited manual-reconciliation deposits."""
     if not deposits:
         return FeatureResult(None, [], "no_completed_deposits", "moderate", "supporting")
     deposit_ids = sorted(
@@ -469,6 +507,7 @@ def _withdrawal_status_result(
     strength: FeatureStrength,
     scoring_role: FeatureScoringRole,
 ) -> FeatureResult:
+    """Count withdrawals ending in a given final status."""
     if not withdrawals:
         return FeatureResult(None, [], "no_withdrawals", strength, scoring_role)
     withdrawal_ids = sorted(
@@ -484,6 +523,7 @@ def _net_money_flow_result(
     deposits: list[dict[str, Any]],
     withdrawals: list[dict[str, Any]],
 ) -> FeatureResult:
+    """Completed deposits minus completed withdrawals."""
     money_in = sum(_amount(row) for row in deposits)
     money_out = sum(_amount(row) for row in withdrawals)
     return FeatureResult(
@@ -500,6 +540,7 @@ def _distinct_instrument_result(
     column: str,
     evidence_name: str,
 ) -> FeatureResult:
+    """Count distinct payment methods or accounts visible in money rows."""
     values = sorted(
         {
             value
@@ -516,6 +557,7 @@ def _pair_null_reason(
     withdrawals: list[dict[str, Any]],
     pairs: list[DepositWithdrawalPair],
 ) -> str | None:
+    """Explain why deposit-withdrawal timing could not be measured."""
     if not deposits:
         return "no_completed_deposits"
     if not withdrawals:

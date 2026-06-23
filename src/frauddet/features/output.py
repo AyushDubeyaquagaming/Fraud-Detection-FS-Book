@@ -1,4 +1,8 @@
-"""Shared materialization and output helpers for feature groups."""
+"""Shared materialization and output helpers for feature groups.
+
+Feature modules should focus on domain logic. This module owns the common
+wide table plus long evidence-store shape, dtype normalization, and file writes.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -14,6 +18,8 @@ from .schema import FeatureResult, FeatureScoringRole, FeatureStrength
 
 @dataclass(frozen=True)
 class FeatureSpec:
+    """Declared metadata for one feature column."""
+
     strength: FeatureStrength
     scoring_role: FeatureScoringRole
     value_kind: str
@@ -21,6 +27,8 @@ class FeatureSpec:
 
 @dataclass(frozen=True)
 class FeatureBuildResult:
+    """Feature rows, evidence rows, and optional parquet output paths."""
+
     player_features: pd.DataFrame
     feature_evidence: pd.DataFrame
     output_paths: dict[str, Path]
@@ -34,7 +42,12 @@ def materialize_feature_group(
     output_dir: Path | None = None,
     write_outputs: bool = True,
 ) -> FeatureBuildResult:
-    """Materialize one feature group using the standard wide/long contract."""
+    """Materialize one feature group using the standard wide/long contract.
+
+    The result factory returns `FeatureResult` objects for one player. This
+    helper expands those into scalar columns, metadata columns, and one evidence
+    row per player-feature pair.
+    """
     feature_rows: list[dict[str, object]] = []
     evidence_rows: list[dict[str, str]] = []
     for player_key in sorted(player_keys):
@@ -44,6 +57,8 @@ def materialize_feature_group(
         feature_row: dict[str, object] = {"player_key": player_key}
         for feature_name, spec in specs.items():
             result = results[feature_name]
+            # Feature modules declare metadata once in FEATURE_SPECS. The check
+            # catches accidental strength/role drift inside helper functions.
             if (
                 result.feature_strength != spec.strength
                 or result.feature_scoring_role != spec.scoring_role
@@ -82,7 +97,11 @@ def combine_feature_build_results(
     output_dir: Path | None = None,
     write_outputs: bool = True,
 ) -> FeatureBuildResult:
-    """Combine independently built groups into the standard Phase 3 outputs."""
+    """Combine independently built groups into the standard Phase 3 outputs.
+
+    Every group must cover the same player population. The merge is intentionally
+    one-to-one so a missing player or duplicate feature name fails loudly.
+    """
     if not results:
         raise ValueError("At least one feature result is required.")
     combined = results[0].player_features.copy()
@@ -110,6 +129,7 @@ def combine_feature_build_results(
 
 
 def apply_feature_dtypes(frame: pd.DataFrame, specs: dict[str, FeatureSpec]) -> None:
+    """Apply pandas nullable dtypes so nulls survive parquet round-trips."""
     for feature_name, spec in specs.items():
         if spec.value_kind == "count":
             frame[feature_name] = frame[feature_name].astype("Int64")
@@ -133,6 +153,7 @@ def write_feature_outputs(
     feature_evidence: pd.DataFrame,
     output_dir: Path | None,
 ) -> dict[str, Path]:
+    """Write the Phase 3 feature table and evidence store."""
     target = output_dir or config.DATA_DIR
     target.mkdir(parents=True, exist_ok=True)
     paths = {

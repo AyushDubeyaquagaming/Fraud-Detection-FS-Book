@@ -123,7 +123,12 @@ class IdentityMapper:
         players: Iterable[dict[str, Any]],
         preregistration_docs: Iterable[dict[str, Any]] | None = None,
     ) -> "IdentityMapper":
-        """Build a mapper from raw player documents and optional OTP docs."""
+        """Build a mapper from raw player documents and optional OTP docs.
+
+        The source system can reuse a phone across player documents. We keep a
+        deterministic winner for joins and also expose the collision so reports
+        can flag the ambiguity.
+        """
         player_docs = list(players)
         phone_to_key: dict[str, str] = {}
         objectid_to_key: dict[str, str] = {}
@@ -138,6 +143,8 @@ class IdentityMapper:
             player_key = str(raw_player_key)
             objectid_to_key[player_key.lower()] = player_key
 
+            # Some player docs carry the same number in username/contactNo with
+            # different formatting. Normalize both and treat them as one phone.
             player_phones = {
                 phone
                 for phone in (
@@ -179,6 +186,8 @@ class IdentityMapper:
                     )
                 )
 
+        # OTP rows help distinguish "not a player yet" from truly unknown
+        # source identifiers in unjoined reports.
         preregistration_phones: set[str] = set()
         if preregistration_docs is not None:
             for doc in preregistration_docs:
@@ -229,6 +238,8 @@ class IdentityMapper:
             player_key = self.phone_to_key.get(phone)
             if player_key:
                 return IdentityResult(player_key, None)
+            # Classify unresolved phones for reporting only. These classes do
+            # not drop data; downstream features simply require player_key.
             if phone in self.preregistration_phones:
                 return IdentityResult(None, "pre_registration")
             if looks_like_test_number(phone):

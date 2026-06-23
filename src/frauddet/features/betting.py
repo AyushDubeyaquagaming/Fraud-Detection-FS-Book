@@ -1,4 +1,10 @@
-"""Betting-anomaly features built from frozen bet records."""
+"""Betting-anomaly features built from frozen bet records.
+
+These are statistical signals, so most of them are volume-gated and expected to
+be dormant on the small dev snapshot. The code is built for production
+calibration: compute per game type, keep reviewer evidence, and return honest
+nulls when a player has too little betting history.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -29,6 +35,8 @@ FEATURE_SPECS: dict[str, FeatureSpec] = {
 
 @dataclass(frozen=True)
 class BettingThresholds:
+    """Config-driven placeholder thresholds for betting features."""
+
     min_settled_bets_for_winrate: int
     min_bets_for_timing: int
     min_bets_for_volatility: int
@@ -54,7 +62,12 @@ def build_betting_features(
     output_dir: Path | None = None,
     write_outputs: bool = True,
 ) -> FeatureBuildResult:
-    """Build exactly the Phase 3 v1 betting-anomaly feature group."""
+    """Build exactly the Phase 3 v1 betting-anomaly feature group.
+
+    The scalar output stays one column per feature. When a feature is computed
+    per game type, the scalar is the dominant or most suspicious per-game value
+    and the full per-game breakdown is stored in evidence.
+    """
     players = load_snapshot("players") if players is None else players.copy()
     bets = load_snapshot("bets") if bets is None else bets.copy()
     players = players[players["player_key"].notna()].copy()
@@ -68,6 +81,8 @@ def build_betting_features(
         & bets["player_key"].astype(str).isin(population)
     ].copy()
     joined_bets["player_key"] = joined_bets["player_key"].astype(str)
+    # Betting ratios assume the Phase 2 currency relabel has already happened.
+    # This protects feature work from accidentally reading raw source rows.
     unexpected_currencies = set(joined_bets["currency"].dropna().astype(str)) - {"UGX"}
     if unexpected_currencies:
         raise ValueError(
@@ -95,7 +110,12 @@ def sportsbook_active_players(
     bets: pd.DataFrame,
     population: set[str] | frozenset[str] | None = None,
 ) -> frozenset[str]:
-    """Return players with any joined sportsbook bet in the flattened contract."""
+    """Return players with any joined sportsbook bet in the flattened contract.
+
+    Payment turnover logic uses this same helper so `pay_` casino-null behavior
+    and `bet_game_type_concentration` use the same definition of observable
+    sportsbook activity.
+    """
     if bets.empty or "player_key" not in bets:
         return frozenset()
     joined = bets[bets["player_key"].notna()].copy()
@@ -109,6 +129,7 @@ def _player_results(
     bet_rows: list[dict[str, Any]],
     thresholds: BettingThresholds,
 ) -> dict[str, FeatureResult]:
+    """Compute all bet_ feature results for one player."""
     groups = _groups_by_game_type(bet_rows)
     return {
         "bet_win_rate_vs_volume": _win_rate_vs_volume(groups, thresholds),
@@ -128,6 +149,7 @@ def _win_rate_vs_volume(
     groups: dict[str, list[dict[str, Any]]],
     thresholds: BettingThresholds,
 ) -> FeatureResult:
+    """Highest per-game settled win rate after the minimum-volume gate."""
     if not groups:
         return FeatureResult(None, [], "no_bets", "strong", "scoring")
     measured: list[dict[str, Any]] = []
@@ -162,6 +184,7 @@ def _timing_regularity(
     groups: dict[str, list[dict[str, Any]]],
     thresholds: BettingThresholds,
 ) -> FeatureResult:
+    """Lowest per-game coefficient of variation for inter-bet gaps."""
     if not groups:
         return FeatureResult(None, [], "no_bets", "strong", "scoring")
     measured: list[dict[str, Any]] = []
@@ -205,6 +228,7 @@ def _stake_volatility(
     groups: dict[str, list[dict[str, Any]]],
     thresholds: BettingThresholds,
 ) -> FeatureResult:
+    """Largest per-game stake coefficient of variation after the volume gate."""
     if not groups:
         return FeatureResult(None, [], "no_bets", "moderate", "supporting")
     measured: list[dict[str, Any]] = []
@@ -245,6 +269,7 @@ def _stake_volatility(
 
 
 def _bonus_funded_stake_share(rows: list[dict[str, Any]]) -> FeatureResult:
+    """Share of total stake funded by bonus stake or free bets."""
     if not rows:
         return FeatureResult(None, [], "no_bets", "moderate", "supporting")
     stake_sum = sum(_number(row.get("stake")) for row in rows)
@@ -271,6 +296,7 @@ def _bonus_funded_stake_share(rows: list[dict[str, Any]]) -> FeatureResult:
 
 
 def _game_type_concentration(groups: dict[str, list[dict[str, Any]]]) -> FeatureResult:
+    """Dominant game-type stake share plus full per-type evidence."""
     if not groups:
         return FeatureResult(None, [], "no_bets", "moderate", "context_only")
     stake_by_type = {
@@ -308,6 +334,7 @@ def _game_type_concentration(groups: dict[str, list[dict[str, Any]]]) -> Feature
 
 
 def _avg_odds(rows: list[dict[str, Any]]) -> FeatureResult:
+    """Mean total odds for players with any observable bets."""
     odds = [
         _number(row.get("total_odds"))
         for row in rows
@@ -325,6 +352,7 @@ def _avg_odds(rows: list[dict[str, Any]]) -> FeatureResult:
 
 
 def _odds_profile(rows: list[dict[str, Any]]) -> FeatureResult:
+    """Spread of total odds as a context-only betting profile."""
     odds_rows = [row for row in rows if _has_number(row.get("total_odds"))]
     if not odds_rows:
         return FeatureResult(None, [], "no_bets", "weak", "context_only")
@@ -343,11 +371,13 @@ def _odds_profile(rows: list[dict[str, Any]]) -> FeatureResult:
 
 
 def _bet_count(rows: list[dict[str, Any]]) -> FeatureResult:
+    """Raw bet count; zero is a real measured value."""
     evidence = [{"ticket_ids": _ticket_ids(rows)}] if rows else []
     return FeatureResult(len(rows), evidence, None, "weak", "context_only")
 
 
 def _active_days(rows: list[dict[str, Any]]) -> FeatureResult:
+    """Number of UTC calendar days with at least one bet."""
     days = sorted(
         {
             timestamp.date().isoformat()
@@ -364,6 +394,7 @@ def _active_days(rows: list[dict[str, Any]]) -> FeatureResult:
 
 
 def _void_rate(rows: list[dict[str, Any]]) -> FeatureResult:
+    """Share of bets with VOID status."""
     if not rows:
         return FeatureResult(None, [], "no_bets", "weak", "context_only")
     void_rows = [row for row in rows if str(row.get("status")) == "VOID"]
@@ -372,6 +403,7 @@ def _void_rate(rows: list[dict[str, Any]]) -> FeatureResult:
 
 
 def _groups_by_game_type(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """Group rows by game_type, using 'unknown' only for missing labels."""
     groups: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         game_type = _optional_string(row.get("game_type")) or "unknown"
@@ -402,6 +434,7 @@ def _inter_bet_gap_seconds(rows: list[dict[str, Any]]) -> list[float]:
 
 
 def _coefficient_of_variation(values: list[float]) -> float:
+    """Population standard deviation divided by mean, with safe zero handling."""
     if not values:
         return 0.0
     series = pd.Series(values, dtype="float64")

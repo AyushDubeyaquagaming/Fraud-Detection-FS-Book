@@ -62,7 +62,10 @@ def count_docs(collection: str) -> int:
 def count_all() -> dict[str, int]:
     """Document count for every collection in the database."""
     with get_database() as db:
-        return {name: db[name].count_documents({}) for name in sorted(db.list_collection_names())}
+        return {
+            name: db[name].count_documents({})
+            for name in sorted(db.list_collection_names())
+        }
 
 
 def sample_docs(collection: str, n: int = 5) -> list[dict[str, Any]]:
@@ -77,7 +80,11 @@ def find_df(
     projection: dict[str, Any] | None = None,
     limit: int = 0,
 ) -> pd.DataFrame:
-    """Run a read-only find() and return results as a DataFrame."""
+    """Run a read-only find() and return results as a DataFrame.
+
+    This helper is for exploration and notebook checks. Pipeline code should
+    still prefer explicit flattening functions so source assumptions are tested.
+    """
     with get_database() as db:
         cursor = db[collection].find(query or {}, projection)
         if limit:

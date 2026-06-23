@@ -1,4 +1,8 @@
-"""Orchestrator for the reviewed Phase 3 feature groups."""
+"""Orchestrator for the reviewed Phase 3 feature groups.
+
+This is the single entry point for building the player feature table. It loads
+the frozen snapshot once, shares common contexts, and writes one combined output.
+"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -22,11 +26,18 @@ def build_phase3_features(
     output_dir: Path | None = None,
     write_outputs: bool = True,
 ) -> FeatureBuildResult:
-    """Build reviewed ma_, pay_, and bet_ groups from one frozen-snapshot load."""
+    """Build reviewed ma_, pay_, and bet_ groups from one frozen-snapshot load.
+
+    Optional DataFrames are mainly for tests. When omitted, every input comes
+    from `frauddet.snapshot.load_snapshot`, not live Mongo or mutable top-level
+    parquet files.
+    """
     players = load_snapshot("players") if players is None else players.copy()
     money = load_snapshot("money") if money is None else money.copy()
     bets = load_snapshot("bets") if bets is None else bets.copy()
     logins = load_snapshot("logins") if logins is None else logins.copy()
+    # Withdrawal filtering and recipient linkage are shared between ma_ and pay_.
+    # Building the context once prevents the groups from disagreeing.
     withdrawals = build_withdrawal_context(players, money)
     ma_result = build_multi_accounting_features(
         players=players,

@@ -1,8 +1,12 @@
 """Phase 2 flattening layer: Mongo base collections -> parquet contracts.
 
-Production business rules live here, not in notebooks. Mongo access is
-read-only; the only writes are deterministic parquet/report outputs under
-`data/`.
+This module turns the messy source collections into stable tables that feature
+engineering can trust. The important business rules live here, not in notebooks:
+identity joins, withdrawal lifecycle collapse, status flags, currency relabels,
+and privacy-safe identity-document hashes.
+
+Mongo access is read-only. The only writes are deterministic parquet and report
+outputs under `data/`.
 """
 from __future__ import annotations
 
@@ -32,7 +36,7 @@ OUTPUT_FILES = {
 
 @dataclass(frozen=True)
 class BuildResult:
-    """Metadata returned by `rebuild_all_flattened_outputs`."""
+    """Small audit bundle returned after a full flatten rebuild."""
 
     output_dir: Path
     raw_counts: dict[str, int]
@@ -45,7 +49,7 @@ class BuildResult:
 
 
 def rebuild_all_flattened_outputs(output_dir: Path | None = None) -> BuildResult:
-    """Rebuild every Phase 2 parquet/report output from read-only Mongo."""
+    """Rebuild every Phase 2 parquet and report output from read-only Mongo."""
     out_dir = output_dir or config.DATA_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -54,7 +58,12 @@ def rebuild_all_flattened_outputs(output_dir: Path | None = None) -> BuildResult
 
 
 def rebuild_all_flattened_outputs_from_db(db: Database, output_dir: Path) -> BuildResult:
-    """Rebuild outputs using an existing read-only Mongo database handle."""
+    """Rebuild outputs using an existing read-only Mongo database handle.
+
+    Tests pass a fake or already-open database here. Production notebooks call
+    `rebuild_all_flattened_outputs`, which opens the configured read-only
+    connection and then delegates to this function.
+    """
     cfg = config.load_config()
     collections = cfg["collections"]
 
@@ -71,10 +80,15 @@ def rebuild_all_flattened_outputs_from_db(db: Database, output_dir: Path) -> Bui
         "cashaccounts": _read_required_docs(db, collections["cashaccounts"]),
     }
 
+    # Build the identity mapper once. Every downstream table uses the same
+    # rules, so unjoined counts are comparable across bets, money, activity,
+    # and login data.
     mapper = IdentityMapper.from_players(
         source_docs["players"], source_docs["registration_otps"]
     )
 
+    # These collections are expected to be one row per business event. If that
+    # assumption breaks, fail early instead of producing duplicated features.
     _validate_unique(source_docs["deposits"], "transactionId", "deposittransactions")
     _validate_unique(source_docs["bets"], "ticketId", "bet_transactions")
 
@@ -114,6 +128,8 @@ def rebuild_all_flattened_outputs_from_db(db: Database, output_dir: Path) -> Bui
     }
     parquet_counts = {name: len(frame) for name, frame in frames.items()}
 
+    # The anomaly report protects the money graph assumptions. It is not used
+    # directly by features, but it tells us if source ledger semantics drift.
     withdrawal_anomaly = analyze_withdrawal_account_resolution(
         source_docs["withdrawals"], source_docs["walletaccounts"], source_docs["cashaccounts"]
     )
@@ -151,11 +167,18 @@ def rebuild_all_flattened_outputs_from_db(db: Database, output_dir: Path) -> Bui
 
 
 def flatten_players(docs: Iterable[dict[str, Any]], mapper: IdentityMapper) -> pd.DataFrame:
-    """Flatten `players` to one row per player."""
+    """Flatten `players` to one row per player.
+
+    Raw NIN and email never leave this function. They are normalized and hashed
+    with a secret salt so multi-account features can compare equality without
+    storing personal identifiers in parquet.
+    """
     fcfg = config.load_config()["flatten"]
     identity_hash_salt = config.get_identity_hash_salt()
     rows: list[dict[str, Any]] = []
     for doc in docs:
+        # `referredBy` is a player-profile field, so it opts into playerId and
+        # referral-code resolution. Event tables keep the stricter default.
         referred_by = (
             mapper.resolve(
                 doc.get("referredBy"),
@@ -203,7 +226,12 @@ def flatten_players(docs: Iterable[dict[str, Any]], mapper: IdentityMapper) -> p
 
 
 def flatten_bets(docs: Iterable[dict[str, Any]], mapper: IdentityMapper) -> pd.DataFrame:
-    """Flatten `bet_transactions` to one row per ticket."""
+    """Flatten `bet_transactions` to one row per ticket.
+
+    Dev source rows label sportsbook currency as INR, but Phase 2 verified the
+    amounts are UGX magnitudes. We relabel to UGX and keep `source_currency`
+    for auditability; there is no FX conversion here.
+    """
     target_currency = config.load_config()["flatten"]["currencies"]["bets"]
     rows: list[dict[str, Any]] = []
     for doc in docs:
@@ -230,6 +258,8 @@ def flatten_bets(docs: Iterable[dict[str, Any]], mapper: IdentityMapper) -> pd.D
                 "currency": _normalized_bet_currency(source_currency, target_currency),
                 "source_currency": source_currency,
                 "created_at": _utc(doc.get("createdDate") or doc.get("createdAt")),
+                # Product confirmed updatedAt is the settlement timestamp for
+                # completed/settled transactions. Later corrections would move it.
                 "settled_at": _utc(doc.get("updatedAt")),
                 "bet_type": doc.get("betType"),
                 "n_selections": len(parts),
@@ -270,7 +300,12 @@ def flatten_money(
     withdrawal_docs: Iterable[dict[str, Any]],
     mapper: IdentityMapper,
 ) -> pd.DataFrame:
-    """Flatten deposits plus lifecycle-collapsed withdrawals."""
+    """Flatten deposits plus lifecycle-collapsed withdrawals.
+
+    Deposits and withdrawals come from separate collections, but features need
+    one money ledger. Amount direction is represented by flags rather than by
+    dropping rows: all statuses stay visible for audit and null-contract logic.
+    """
     rows: list[dict[str, Any]] = []
     flag_cfg = config.load_config()["flatten"]["money_flags"]
 
@@ -297,6 +332,8 @@ def flatten_money(
                 "recipient_normalized": None,
                 "is_third_party_recipient": False,
                 "bonus_tags": _as_list(doc.get("bonusTagName")),
+                # `manual_reconciliation` is included through config because
+                # production manually credits those deposits to the wallet.
                 "is_money_in": status in set(flag_cfg["deposit_money_in_statuses"]),
                 "is_money_out": False,
                 "is_pending_withdrawal": False,
@@ -324,6 +361,8 @@ def flatten_money(
                 "finalized_at": _utc(kept.get("updatedAt")),
                 "execution_type": kept.get("executionType"),
                 "recipient_normalized": recipient,
+                # Recipient sharing is reused by both multi-accounting and
+                # payment features, so this normalized field is the contract.
                 "is_third_party_recipient": bool(recipient and user_phone and recipient != user_phone),
                 "bonus_tags": [],
                 "is_money_in": False,
@@ -371,6 +410,9 @@ def collapse_withdrawal_lifecycles(docs: Iterable[dict[str, Any]]) -> list[dict[
 
     collapsed: list[dict[str, Any]] = []
     for transaction_id, group in groups.items():
+        # One transaction can have several lifecycle rows. Keep the row that
+        # represents the final business state, then preserve the first request
+        # time separately for timing features.
         kept = sorted(
             group,
             key=lambda d: (
@@ -405,7 +447,11 @@ def flatten_bonus(
     deposit_transaction_ids: set[str],
     bet_ticket_ids: set[str],
 ) -> pd.DataFrame:
-    """Flatten `bonustransactions` and add assumed default currency."""
+    """Flatten `bonustransactions` and add assumed default currency.
+
+    The source bonus collection has no currency field. We use the configured
+    production default and make the assumption visible in reconciliation reports.
+    """
     fcfg = config.load_config()["flatten"]
     assumed_currency = fcfg["bonus"]["ASSUMED_DEFAULT"]
     allowed = set(fcfg["bonus"]["allowed_transaction_types"])
@@ -446,7 +492,7 @@ def flatten_bonus(
 
 
 def flatten_activity(docs: Iterable[dict[str, Any]], mapper: IdentityMapper) -> pd.DataFrame:
-    """Flatten `useractivitylogs` with normalized client IP."""
+    """Flatten `useractivitylogs` with Cloudflare-stripped client IP."""
     rows: list[dict[str, Any]] = []
     for doc in docs:
         ident = mapper.resolve(doc.get("playerId"))
@@ -476,7 +522,12 @@ def flatten_activity(docs: Iterable[dict[str, Any]], mapper: IdentityMapper) -> 
 
 
 def flatten_logins(docs: Iterable[dict[str, Any]], mapper: IdentityMapper) -> pd.DataFrame:
-    """Flatten `loginlogs`; PLAYER rows resolve through the common mapper."""
+    """Flatten `loginlogs`; PLAYER rows resolve through the common mapper.
+
+    Staff/admin logins are kept for reports but intentionally never join to a
+    player. Device fingerprints are cleaned here so feature code can trust
+    that non-null fingerprints are usable.
+    """
     rows: list[dict[str, Any]] = []
     for doc in docs:
         user_type = doc.get("userType")
@@ -511,7 +562,12 @@ def analyze_withdrawal_account_resolution(
     wallet_docs: Iterable[dict[str, Any]],
     cash_docs: Iterable[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Crosstab withdrawal status by where account IDs resolve."""
+    """Crosstab withdrawal status by where account IDs resolve.
+
+    This is a lightweight ledger sanity check. Completed withdrawals should
+    point wallet -> cash; failed/declined reversal rows can point back to the
+    wallet. If those shapes change, the reconciliation report flags it.
+    """
     wallet_ids = {str(d.get("_id")) for d in wallet_docs}
     cash_ids = {str(d.get("_id")) for d in cash_docs}
 
@@ -595,7 +651,11 @@ def write_unjoined_report(
     cfg: dict[str, Any] | None = None,
     identity_collisions: list[dict[str, Any]] | None = None,
 ) -> Path:
-    """Write markdown counts and sample IDs for unresolved identities."""
+    """Write markdown counts and sample IDs for unresolved identities.
+
+    Unjoined rows are not dropped from parquet. They stay visible here, then
+    feature builders exclude them by requiring a non-null `player_key`.
+    """
     cfg = cfg or config.load_config()
     sample_n = int(cfg["flatten"]["unjoined"]["sample_ids_per_class"])
     known_orphans = cfg["flatten"]["unjoined"]["known_orphan_wallet_ids"]
@@ -665,7 +725,12 @@ def write_reconciliation_report(
     cfg: dict[str, Any] | None = None,
     identity_collisions: list[dict[str, Any]] | None = None,
 ) -> Path:
-    """Write raw Mongo vs parquet count reconciliation."""
+    """Write raw Mongo vs parquet count reconciliation.
+
+    This report is the handoff between flattening and feature work. It records
+    count changes, lifecycle collapse, account-graph invariants, and identity
+    collisions in one place.
+    """
     cfg = cfg or config.load_config()
     identity_collisions = identity_collisions or []
     expected_money = raw_counts["deposits"] + collapsed_withdrawal_count
@@ -716,6 +781,7 @@ def write_reconciliation_report(
 
 
 def _read_required_docs(db: Database, collection_name: str | None) -> list[dict[str, Any]]:
+    """Read a required base collection and reject missing collections/views."""
     if not collection_name:
         raise ValueError("Required source collection is not configured.")
     info = list(db.list_collections(filter={"name": collection_name}))
@@ -728,6 +794,7 @@ def _read_required_docs(db: Database, collection_name: str | None) -> list[dict[
 
 
 def _validate_unique(docs: Iterable[dict[str, Any]], field: str, source: str) -> None:
+    """Fail if a source business key that should be unique is duplicated."""
     values = [doc.get(field) for doc in docs if doc.get(field) is not None]
     counts = Counter(values)
     duplicates = [str(value) for value, count in counts.items() if count > 1]
@@ -789,6 +856,7 @@ def _markdown_rows(rows: list[dict[str, Any]]) -> str:
 
 
 def _ordered_frame(rows: list[dict[str, Any]], columns: list[str], sort_cols: list[str]) -> pd.DataFrame:
+    """Return a stable DataFrame so notebook diffs and parquet output are repeatable."""
     frame = pd.DataFrame(rows, columns=columns)
     if frame.empty:
         return frame
@@ -854,6 +922,7 @@ def _valid_fingerprint(value: Any) -> str | None:
 
 
 def _normalized_bet_currency(source_currency: Any, target_currency: str) -> str | None:
+    """Relabel the verified INR-on-bets dev artifact to the UGX contract."""
     if source_currency is None:
         return None
     text = str(source_currency).strip()
@@ -879,6 +948,7 @@ def _normalize_email(value: Any) -> str | None:
 
 
 def _salted_hash(value: str | None, salt: str) -> str | None:
+    """Hash an already-normalized identity value without storing the raw value."""
     if value is None:
         return None
     payload = f"{salt}\0{value}".encode("utf-8")
@@ -886,6 +956,7 @@ def _salted_hash(value: str | None, salt: str) -> str | None:
 
 
 def _login_success(doc: dict[str, Any]) -> bool | None:
+    """Best-effort login success flag from the fields available in dev logs."""
     if "success" in doc:
         return bool(doc.get("success"))
     operation = str(doc.get("operationType") or "").lower()

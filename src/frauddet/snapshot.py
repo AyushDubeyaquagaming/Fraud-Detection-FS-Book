@@ -1,4 +1,9 @@
-"""Helpers for reading the frozen Phase 3 parquet snapshot."""
+"""Helpers for reading the frozen Phase 3 parquet snapshot.
+
+Phase 3 and later feature work must read versioned snapshot parquet, not live
+Mongo and not the mutable top-level Phase 2 outputs. This module keeps that path
+choice in one place.
+"""
 from __future__ import annotations
 
 from pathlib import Path

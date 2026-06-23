@@ -1,8 +1,9 @@
-"""Configuration loading: merges committed config.yaml with secrets from .env.
+"""Configuration loading for committed settings and local secrets.
 
-Single source of truth for "where is the repo root", "what is the Mongo URI",
-"what database / collections do we read". Everything else imports from here so
-paths and names are defined once.
+`config.yaml` holds non-secret project settings such as collection names,
+thresholds, and snapshot paths. `.env` holds local secrets such as the Mongo URI
+and identity-hash salt. Keeping that split clear makes notebooks and feature
+code reproducible without ever committing credentials.
 """
 from __future__ import annotations
 
@@ -45,7 +46,7 @@ def get_mongo_uri() -> str:
 
 
 def get_database_name() -> str:
-    """Name of the data database to read from (NOT the auth database)."""
+    """Name of the data database to read from, not the auth database."""
     return load_config()["mongo"]["database"]
 
 
@@ -55,7 +56,12 @@ def get_collection_names() -> dict[str, str | None]:
 
 
 def get_identity_hash_salt() -> str:
-    """Return the secret salt used for one-way identity-document hashes."""
+    """Return the secret salt used for one-way identity-document hashes.
+
+    The salt belongs in `.env`, not config.yaml. Without it, flattening refuses
+    to write `nin_hash` or `email_hash` so raw identity values never leak into
+    deterministic outputs as a fallback.
+    """
     load_dotenv(ENV_PATH)
     var = load_config()["identity_hashing"]["salt_env_var"]
     salt = os.environ.get(var)
