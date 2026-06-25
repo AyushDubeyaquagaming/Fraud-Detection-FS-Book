@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 import sqlite3
 from typing import Any, Protocol
+from uuid import uuid4
 
 import pandas as pd
 
@@ -503,10 +504,11 @@ def get_snapshot_id(cfg: dict[str, Any]) -> str:
 
 
 def make_run_id(ruleset_version: str, snapshot_id: str, created_at: str | None = None) -> str:
-    """Create a path-safe run ID from timestamp, ruleset, and snapshot."""
+    """Create a path-safe, collision-resistant ID for one feedback run."""
     stamp = created_at or _now_iso()
-    compact_stamp = re.sub(r"[^0-9TZ]", "", stamp).replace("Z", "Z")
-    return _safe_id(f"feedback_{compact_stamp}_{ruleset_version}_{snapshot_id}")
+    compact_stamp = re.sub(r"[^0-9TZ]", "", stamp)
+    suffix = uuid4().hex[:8]
+    return _safe_id(f"feedback_{compact_stamp}_{ruleset_version}_{snapshot_id}_{suffix}")
 
 
 def case_id_for(run_id: str, player_key: str, detection_source: str) -> str:

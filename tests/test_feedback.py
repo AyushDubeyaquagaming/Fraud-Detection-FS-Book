@@ -20,6 +20,7 @@ from frauddet.feedback import (
     get_routing_bands,
     get_ruleset_version,
     get_snapshot_id,
+    make_run_id,
     record_review,
     run_simulated_feedback_loop,
 )
@@ -90,6 +91,17 @@ def test_case_id_is_unique_per_flagging_event():
 
     assert same_run == repeated
     assert len({same_run, new_run, human_channel}) == 3
+
+
+def test_make_run_id_is_collision_resistant_for_same_timestamp():
+    created_at = "2026-06-25T08:11:07Z"
+
+    first = make_run_id("test_rules_v1", "snapshot_phase3_2026-06-19b", created_at)
+    second = make_run_id("test_rules_v1", "snapshot_phase3_2026-06-19b", created_at)
+
+    assert first != second
+    assert first.startswith("feedback_20260625T081107Z_test_rules_v1_snapshot_phase3_2026-06-19b_")
+    assert second.startswith("feedback_20260625T081107Z_test_rules_v1_snapshot_phase3_2026-06-19b_")
 
 
 def test_local_store_append_only_reviews_and_status_coupling(tmp_path):
