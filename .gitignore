@@ -38,7 +38,7 @@ scoring_design.md
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt
-
+feedback_design.md
 # Unit test / coverage reports
 htmlcov/
 .tox/

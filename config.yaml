@@ -124,6 +124,7 @@ phase3:
 # Phase 4 rule scoring. Every threshold, point value, and band cut below is a
 # PLACEHOLDER - recalibrate on production labels and reviewer feedback.
 scoring:
+  ruleset_version: "2026-06-25.1"  # PLACEHOLDER - bump when scoring config changes.
   bands:
     medium_cut: 40   # PLACEHOLDER
     high_cut: 80     # PLACEHOLDER
@@ -274,3 +275,12 @@ scoring:
       op: gte
       threshold_key: R-BET-04
       reason_template: "bonus-funded stake share {value:.2f}; bonus tickets {bonus_staked_ticket_ids} (+{points:g})"
+
+# Phase 5 feedback loop. Local storage is v1; Mongo is a later backend swap
+# behind the FeedbackStore interface.
+feedback:
+  output_dir: data/feedback
+  sqlite_path: data/feedback/feedback.sqlite
+  routing_bands:  # PLACEHOLDER - review routing gate, not calibrated triage.
+    - medium
+    - high
